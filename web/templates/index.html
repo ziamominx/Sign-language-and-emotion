@@ -48,10 +48,11 @@
           <p id="mode-hint" class="mode-hint">ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat a word. Hold both hands open for 1.5 seconds to speak the full message.</p>
           <section class="teach-panel" aria-labelledby="teach-title">
             <div><p class="eyebrow">YOUR VOCABULARY</p><h3 id="teach-title">Teach a sign</h3></div>
-            <p>Name a sign, then record it three times with slight changes in speed and position. The saved coordinates are used automatically when you sign again.</p>
+            <p>Name a sign, then record it three times with slight changes in speed and position. Train a model on the saved coordinates so your signs run on your own trained dataset.</p>
             <div class="teach-form"><label for="sign-label">Sign or word</label><input id="sign-label" type="text" maxlength="40" placeholder="e.g. my name" autocomplete="off"><button id="record-example" class="button button-primary" type="button" disabled>Record example</button></div>
             <p id="training-status" class="training-status" role="status">Start the camera to record an example.</p>
             <ul id="personal-signs" class="personal-signs" aria-label="Saved personal signs"></ul>
+            <div class="train-row"><button id="train-model" class="button button-light" type="button">Train on my signs</button><span id="train-progress" class="train-progress" role="status"></span></div>
           </section>
         </section>
 

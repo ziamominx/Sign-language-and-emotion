@@ -95,16 +95,24 @@ function renderHandOverlay(now) {
     const y2 = Math.min(overlay.height, Math.max(...ys) * overlay.height + 6);
     overlayContext.strokeStyle = 'rgba(240,248,232,.55)';
     overlayContext.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    if (emotionVisible && $('#show-emotion').checked) {
-      const caption = `${emotionLabel}${emotionTentative ? '?' : ''} · ${Math.round(emotionScore)}%`;
-      overlayContext.font = '600 14px Manrope, Arial, sans-serif';
-      const width = overlayContext.measureText(caption).width + 20;
-      const left = Math.max(4, Math.min(overlay.width - width - 4, (x1 + x2 - width) / 2));
-      const top = Math.max(4, y1 - 30);
-      overlayContext.fillStyle = 'rgba(20,26,24,.9)';
-      overlayContext.fillRect(left, top, width, 24);
-      overlayContext.fillStyle = '#dff29c';
-      overlayContext.fillText(caption, left + 10, top + 17);
+    if (emotionVisible && $('#show-emotion').checked && emotionLabel) {
+      // Compact expression tag above the head, in the style of the older
+      // desktop app — no large panel on the side.
+      const caption = emotionTentative ? `${emotionLabel}?` : emotionLabel;
+      overlayContext.font = '700 13px Manrope, Arial, sans-serif';
+      const width = overlayContext.measureText(caption).width + 16;
+      const left = Math.max(4, Math.min(overlay.width - width - 4,
+        (x1 + x2 - width) / 2));
+      const top = Math.max(4, y1 - 28);
+      overlayContext.fillStyle = 'rgba(12,17,14,.78)';
+      overlayContext.beginPath();
+      overlayContext.roundRect(left, top, width, 22, 11);
+      overlayContext.fill();
+      overlayContext.strokeStyle = 'rgba(201,224,107,.55)';
+      overlayContext.lineWidth = 1;
+      overlayContext.stroke();
+      overlayContext.fillStyle = emotionTentative ? '#dbe6cf' : '#dff29c';
+      overlayContext.fillText(caption, left + 8, top + 15);
     }
   }
   overlayContext.lineWidth = 2;
@@ -230,7 +238,8 @@ function renderSuggestions(items = []) {
     const label = document.createElement('span');
     label.textContent = item.label;
     const score = document.createElement('small');
-    score.textContent = item.source === 'personal' ? 'Saved coordinate match  + ADD'
+    score.textContent = item.source === 'trained' ? 'Trained model match  + ADD'
+      : item.source === 'personal' ? 'Saved coordinate match  + ADD'
       : `${Math.round(item.score * 100)}% model score  + ADD`;
     button.append(label, score);
     button.addEventListener('click', () => recognitionMode === 'words' ? addWord(item.label) : addLetter(item.label));
@@ -276,6 +285,8 @@ function updateTrainingControls() {
   const button = $('#record-example');
   button.disabled = !stream || paused || recognitionMode !== 'words' || trainingBusy;
   button.textContent = recording ? 'Cancel recording' : 'Record example';
+  const trainButton = $('#train-model');
+  if (trainButton) trainButton.disabled = trainingBusy;
   if (stream && $('#training-status').textContent === 'Start the camera to record an example.') {
     $('#training-status').textContent = 'Enter a sign label and record it three times.';
   }
@@ -304,7 +315,7 @@ function renderPersonalSigns(signs) {
         $('#training-status').textContent = data.error || 'Could not remove the saved sign.';
         return;
       }
-      renderPersonalSigns(data.signs);
+      loadPersonalSigns();
       $('#training-status').textContent = `Removed “${sign.label}”.`;
     });
     item.append(name, count, remove);
@@ -318,8 +329,75 @@ async function loadPersonalSigns() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not load your saved signs');
     renderPersonalSigns(data.signs);
+    renderTrainedStatus(data);
   } catch (error) {
     $('#training-status').textContent = error.message;
+  }
+}
+
+function renderTrainedStatus(data) {
+  const progress = $('#train-progress');
+  const button = $('#train-model');
+  if (!progress || !button) return;
+  if (data.trained) {
+    const accuracy = typeof data.trained_accuracy === 'number' && data.trained_accuracy > 0
+      ? ` · ${Math.round(data.trained_accuracy * 100)}% validation accuracy` : '';
+    progress.textContent = `Trained model active${accuracy}`;
+  } else {
+    progress.textContent = data.signs?.length
+      ? 'Not trained yet — record at least two signs, then train.'
+      : 'Record examples, then train your own model.';
+  }
+  button.textContent = 'Train on my signs';
+  button.disabled = trainingBusy;
+}
+
+async function pollTraining() {
+  try {
+    const response = await fetch('/api/personal-signs/train/status');
+    const state = await response.json();
+    if (!response.ok) throw new Error('Training status unavailable');
+    if (state.running) {
+      setTimeout(pollTraining, 800);
+      return;
+    }
+    trainingBusy = false;
+    updateTrainingControls();
+    if (state.result?.ready) {
+      const percent = state.result.validation_accuracy
+        ? ` · ${Math.round(state.result.validation_accuracy * 100)}% validation accuracy`
+        : '';
+      $('#train-progress').textContent = `Trained on ${state.result.examples} examples${percent}`;
+      $('#training-status').textContent = `Model trained on ${state.result.classes} signs. Sign again to test it.`;
+    } else {
+      $('#train-progress').textContent = 'Training failed.';
+      $('#training-status').textContent = state.result?.error
+        || state.result?.reason || 'Training could not run.';
+    }
+    loadPersonalSigns();
+  } catch (error) {
+    trainingBusy = false;
+    updateTrainingControls();
+    $('#train-progress').textContent = 'Training failed.';
+    announce(error.message, true);
+  }
+}
+
+async function startTraining() {
+  if (trainingBusy) return;
+  trainingBusy = true;
+  updateTrainingControls();
+  $('#train-progress').textContent = 'Training on your saved signs…';
+  try {
+    const response = await fetch('/api/personal-signs/train', {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Training could not start');
+    pollTraining();
+  } catch (error) {
+    trainingBusy = false;
+    updateTrainingControls();
+    $('#train-progress').textContent = 'Training failed.';
+    announce(error.message, true);
   }
 }
 
@@ -333,7 +411,7 @@ async function saveRecording(record) {
       body: JSON.stringify({label: record.label, frames: record.frames})});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not save this example');
-    renderPersonalSigns(data.signs);
+    loadPersonalSigns();
     $('#training-status').textContent = data.saved.ready
       ? `“${data.saved.label}” is ready. Sign it again to test recognition.`
       : `Saved example ${data.saved.examples}/3 for “${data.saved.label}”. Record it again.`;
@@ -735,7 +813,9 @@ async function recognizeLive(clip) {
     }
     const [first] = data.suggestions;
     $('#live-guess').textContent = first.label;
-    $('#live-detail').textContent = data.source === 'personal'
+    $('#live-detail').textContent = data.source === 'trained'
+      ? `Trained model match · ${data.processing_ms} ms analysis`
+      : data.source === 'personal'
       ? `Saved coordinate match · ${data.processing_ms} ms analysis`
       : `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
     renderSuggestions(data.suggestions);
@@ -822,6 +902,8 @@ $('#record-example').addEventListener('click', () => {
   $('#training-status').textContent = `Get ready to sign “${label}”, then hold the movement in view.`;
   updateTrainingControls();
 });
+const trainButton = $('#train-model');
+if (trainButton) trainButton.addEventListener('click', startTraining);
 $('#mode-words').addEventListener('click', () => setMode('words'));
 $('#mode-letters').addEventListener('click', () => setMode('letters'));
 $('#show-emotion').addEventListener('change', () => {

@@ -4,6 +4,7 @@ from pathlib import Path
 from contextlib import ExitStack
 from importlib.util import find_spec
 import os
+import threading
 from threading import Lock, RLock
 from time import perf_counter
 
@@ -15,7 +16,8 @@ from flask import Flask, jsonify, render_template, request
 from asl_model import ASLRecognizer
 from alphabet_model import ASLAlphabetRecognizer
 from personal_signs import PersonalSigns
-
+from train_model import load_model as load_trained_model
+from train_model import train as run_training
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, template_folder=str(ROOT / "web" / "templates"),
@@ -33,6 +35,26 @@ pose_tracker = None
 pose_tracker_lock = RLock()
 personal_signs = None
 personal_signs_lock = Lock()
+trained_model = None
+trained_model_lock = Lock()
+training_state = {"running": False, "result": None}
+training_lock = Lock()
+
+# The trained model must beat these gates before it may auto-add a word;
+# otherwise the request falls through to the template matcher and the
+# pretrained 2,000-word model.
+TRAINED_MIN_CONFIDENCE = 0.72
+TRAINED_MIN_MARGIN = 0.12
+
+
+def get_trained_model():
+    """Load the trained personal-sign model once; invalidate when retrained."""
+    global trained_model
+    if trained_model is None:
+        with trained_model_lock:
+            if trained_model is None:
+                trained_model = load_trained_model(get_personal_signs().path.parent)[0]
+    return trained_model
 
 
 def get_tracker():
@@ -79,6 +101,13 @@ def get_personal_signs():
     return personal_signs
 
 
+def invalidate_trained_model():
+    """Pick up a freshly trained model on the next recognition request."""
+    global trained_model
+    with trained_model_lock:
+        trained_model = None
+
+
 def _open_palm(landmarks):
     """Require four extended fingers, regardless of hand rotation or mirror."""
     wrist = np.array([landmarks[0].x, landmarks[0].y])
@@ -104,18 +133,67 @@ def classify_expression(face_image):
     return choose_expression(analysis["dominant_emotion"], analysis["emotion"])
 
 
+EXPRESSION_SMOOTHING_WINDOW = 3
+_expression_history = []
+
+
+def _record_expression(expression):
+    """Keep recent expression readings so mild changes survive a jittery model."""
+    _expression_history.append((str(expression.get("label", "")),
+                                float(expression.get("score", 0)),
+                                bool(expression.get("tentative"))))
+    del _expression_history[:-EXPRESSION_SMOOTHING_WINDOW]
+
+
+def smoothed_expression():
+    """Fuse the last readings; a tentative majority becomes a confident guess."""
+    if not _expression_history:
+        return None
+    if len(_expression_history) < EXPRESSION_SMOOTHING_WINDOW:
+        label, score, tentative = _expression_history[-1]
+        return {"label": label, "score": round(score, 1), "tentative": tentative}
+    tally = {}
+    for label, score, tentative in _expression_history:
+        entry = tally.setdefault(label, {"count": 0, "score": 0.0, "tentative": 0})
+        entry["count"] += 1
+        entry["score"] += score
+        entry["tentative"] += int(tentative)
+    best_label, best = max(tally.items(), key=lambda item: item[1]["count"])
+    if best["count"] < 2:
+        label, score, tentative = _expression_history[-1]
+        return {"label": label, "score": round(score, 1), "tentative": tentative}
+    return {"label": best_label, "score": round(best["score"] / best["count"], 1),
+            "tentative": best["tentative"] < best["count"]}
+
+
 def choose_expression(dominant, raw_scores):
-    """Use the full score distribution when a mild expression nearly ties neutral."""
+    """Promote happy/sad when DeepFace's neutral bias nearly ties them.
+
+    DeepFace's training set makes neutral absorb mild expressions, so the
+    dominant label alone almost always reads Neutral. Compare the gap to
+    neutral against the spread between the other expressions: when an
+    expression is meaningfully ahead of neutral but not of its peers, it
+    is shown as tentative; when it is genuinely competitive, it wins.
+    """
     scores = {key: float(value) for key, value in raw_scores.items()}
     label = str(dominant).lower()
     if label not in {"angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"}:
         raise ValueError("Unknown expression label")
+    neutral = scores.get("neutral", 0)
+    expressive = {name: value for name, value in scores.items() if name != "neutral"}
+    best_expressive = max(expressive, key=expressive.get, default=None)
+    runner_up = max((value for name, value in expressive.items() if name != best_expressive),
+                    default=0)
     tentative = False
-    if label == "neutral":
-        expressive = max(("happy", "sad"), key=lambda key: scores.get(key, 0))
-        if scores.get(expressive, 0) >= 25 and scores[expressive] >= scores.get("neutral", 0) * 0.75:
-            label = expressive
-            tentative = True
+    if best_expressive:
+        gap_to_runner = expressive[best_expressive] - runner_up
+        gap_to_neutral = neutral - expressive[best_expressive]
+        if expressive[best_expressive] >= 18:
+            if gap_to_neutral <= 0 and gap_to_runner >= 8:
+                label = best_expressive
+            elif 0 < gap_to_neutral <= 12 and gap_to_runner >= 6:
+                label = best_expressive
+                tentative = True
     return {"label": label.capitalize(), "score": round(scores.get(label, 0), 1),
             "tentative": tentative}
 
@@ -370,7 +448,7 @@ def emotion_predict():
         if not found.detections:
             return jsonify({"visible": False, "label": None})
         box = found.detections[0].location_data.relative_bounding_box
-        pad_x, pad_y = box.width * 0.10, box.height * 0.10
+        pad_x, pad_y = box.width * 0.22, box.height * 0.30
         x1 = max(0, int((box.xmin - pad_x) * width))
         y1 = max(0, int((box.ymin - pad_y) * height))
         x2 = min(width, int((box.xmin + box.width + pad_x) * width))
@@ -378,7 +456,8 @@ def emotion_predict():
         if x2 - x1 < 48 or y2 - y1 < 48:
             return jsonify({"visible": False, "label": None})
         expression = classify_expression(image[y1:y2, x1:x2])
-        return jsonify({"visible": True, **expression})
+        _record_expression(expression)
+        return jsonify({"visible": True, **smoothed_expression()})
     except Exception:
         app.logger.exception("Facial expression analysis failed")
         return jsonify({"error": "Facial expression analysis unavailable"}), 503
@@ -501,6 +580,14 @@ def live_landmarks():
                         "visibility": visibility, "guidance": guidance,
                         "processing_ms": round((perf_counter() - started) * 1000)})
     try:
+        trained_label, trained_confidence = _personal_from_trained_model(points)
+        if trained_label:
+            return jsonify({"visible": True, "suggestions": [{"label": trained_label,
+                            "score": round(trained_confidence, 4), "source": "trained"}],
+                            "uncertain": False,
+                            "source": "trained", "frames": len(points),
+                            "visibility": visibility, "guidance": guidance,
+                            "processing_ms": round((perf_counter() - started) * 1000)})
         personal = get_personal_signs().match(points)
         if personal:
             score = round(0.82 + 0.16 * (1 - personal["distance"] /
@@ -522,11 +609,78 @@ def live_landmarks():
                     "processing_ms": round((perf_counter() - started) * 1000)})
 
 
+def _training_paths():
+    """Reuse the active personal-sign store and .models directory for training."""
+    store = get_personal_signs().path
+    return store, store.parent
+
+
+def _training_worker():
+    try:
+        store_path, directory = _training_paths()
+        result = run_training(store_path, directory, verbose=False)
+        with training_lock:
+            training_state["result"] = result
+    except Exception as exc:
+        app.logger.exception("Training failed")
+        with training_lock:
+            training_state["result"] = {"ready": False, "error": str(exc)}
+    finally:
+        with training_lock:
+            training_state["running"] = False
+        if training_state["result"].get("ready"):
+            invalidate_trained_model()
+
+
+@app.post("/api/personal-signs/train")
+def train_personal_signs():
+    """Train on the saved coordinate examples; runs in the background."""
+    with training_lock:
+        if training_state["running"]:
+            return jsonify({"error": "Training is already running", "running": True}), 409
+        training_state["running"] = True
+        training_state["result"] = None
+    worker = threading.Thread(target=_training_worker, daemon=True)
+    worker.start()
+    return jsonify({"running": True})
+
+
+@app.get("/api/personal-signs/train/status")
+def training_status():
+    with training_lock:
+        state = {"running": training_state["running"],
+                 "result": training_state["result"]}
+    return jsonify(state)
+
+
+def _personal_from_trained_model(points):
+    """Query the trained model; returns (label, confidence) or (None, None)."""
+    trained = get_trained_model()
+    if trained is None:
+        return None, None
+    from personal_signs import coordinate_features, validate_clip
+    try:
+        prediction = trained.predict(coordinate_features(validate_clip(points)))
+    except ValueError:
+        return None, None
+    if prediction is None or prediction["confidence"] < TRAINED_MIN_CONFIDENCE \
+            or prediction["margin"] < TRAINED_MIN_MARGIN:
+        return None, None
+    return prediction["label"], prediction["confidence"]
+
+
 @app.route("/api/personal-signs", methods=["GET", "POST"])
 def personal_signs_api():
     library = get_personal_signs()
     if request.method == "GET":
-        return jsonify({"signs": library.summary(), "required_examples": 3})
+        try:
+            trained = get_trained_model()
+        except Exception:
+            app.logger.exception("Trained model failed to load")
+            trained = None
+        return jsonify({"signs": library.summary(), "required_examples": 3,
+                        "trained": bool(trained),
+                        "trained_accuracy": trained.meta.get("validation_accuracy") if trained else None})
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "Send a sign label and coordinate frames as JSON"}), 400
