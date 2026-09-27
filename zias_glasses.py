@@ -1,4 +1,4 @@
-import subprocess, sys, os, threading, time, math, random, queue, tempfile, wave
+import subprocess, sys, os, threading, time, math, queue, tempfile, wave
 
 def _pip(pkg):
     subprocess.call([sys.executable,"-m","pip","install","--quiet",
@@ -8,12 +8,9 @@ def ensure_deps():
     flag=os.path.join(os.path.dirname(os.path.abspath(__file__)),".zia3")
     tried=os.path.exists(flag); missing=[]
     for mod,pkg in [("cv2","opencv-python==4.9.0.80"),("mediapipe","mediapipe==0.10.14"),
-                    ("numpy","numpy"),("pyttsx3","pyttsx3"),("requests","requests")]:
+                    ("numpy","numpy<2"),("pyttsx3","pyttsx3"),("requests","requests")]:
         try: __import__(mod)
         except ImportError: missing.append(pkg)
-    try:
-        from deepface import DeepFace
-    except: missing.append("deepface")
     if not missing:
         if os.path.exists(flag): os.remove(flag)
         return
@@ -25,6 +22,7 @@ def ensure_deps():
 ensure_deps()
 
 import cv2, numpy as np, mediapipe as mp, pyttsx3, requests
+from sign_recognition import SignLibrary
 os.environ.update({"GLOG_minloglevel":"3","TF_CPP_MIN_LOG_LEVEL":"3",
                    "MEDIAPIPE_DISABLE_GPU":"1"})
 
@@ -45,43 +43,6 @@ FACE_DOTS=list(set([
     172,136,150,149,176,148,152,377,400,365,
     116,123,147,213,345,352,376,433,10,338,297,332,284,109,67,103,54,21,
 ]))
-
-# Gesture table — your 6 primary signs first
-GTABLE = [
-    ("TECHNOLOGY",[1,1,1,1,1], 1),  # open hand
-    ("USE",       [0,1,1,0,0], 1),  # peace V
-    ("FOR",       [0,1,0,0,0], 1),  # point
-    ("HELP",      [1,0,0,0,0], 1),  # thumbs up
-    ("NOT",       [0,1,0,0,1], 1),  # rock
-    ("WAR",       [0,0,0,0,0], 1),  # fist
-    # extras
-    ("LIFE",      [0,1,1,1,1], 1),
-    ("IMPROVE",   [0,0,1,1,0], 1),
-    ("WORLD",     [0,0,0,1,1], 1),
-    ("LOVE",      [1,1,0,0,1], 1),
-    ("GOOD",      [1,1,0,0,0], 1),
-    ("LEARN",     [1,0,1,0,0], 1),
-    ("CARE",      [1,0,0,1,0], 1),
-    ("VOICE",     [1,0,0,0,1], 1),
-    ("AI",        [0,1,0,1,0], 1),
-    ("HUMAN",     [0,0,1,0,0], 1),
-    ("SMART",     [0,0,0,0,1], 1),
-    ("THANK",     [0,0,0,1,0], 1),
-    ("HELLO",     [1,1,1,1,1], 2),  # both hands open
-]
-
-def classify(fingers, num_hands):
-    if not fingers or num_hands == 0: return None
-    f = [int(b) for b in fingers[0]]
-    for word, pat, minh in GTABLE:
-        if num_hands >= minh and f == pat:
-            return word
-    best, bd = None, 999
-    for word, pat, minh in GTABLE:
-        if minh > 1: continue
-        d = sum(a!=b for a,b in zip(f, pat))
-        if d < bd: bd, best = d, word
-    return best if bd <= 1 else None
 
 F=cv2.FONT_HERSHEY_SIMPLEX
 def tsz(t,s): return cv2.getTextSize(t,F,s,1)[0]
@@ -133,10 +94,10 @@ class BgDetector:
         self._q=queue.Queue(maxsize=1); self._eq=queue.Queue(maxsize=1)
         self._fq=queue.Queue(maxsize=1)
         self._lk=threading.Lock(); self._run=True
-        self.hand_pts=[]; self.fingers=[]; self.both_open=False
-        self.num_hands=0; self.face_dots=[]; self.face_box=None
-        self.emotion="Neutral"
-        self.emo_sc={"Happy":0,"Sad":0,"Neutral":1,"Angry":0,"Questioning":0,"Skeptical":0}
+        self.hand_pts=[]; self.sign_pts=[]
+        self.num_hands=0; self.face_dots=[]; self.face_box=None; self.sequence=0
+        self.emotion="Unavailable"
+        self.emo_sc={}
         self._smooth=[{},{}]
         threading.Thread(target=self._loop,  daemon=True).start()
         threading.Thread(target=self._floop, daemon=True).start()
@@ -155,28 +116,26 @@ class BgDetector:
             except queue.Empty: continue
             rgb=cv2.cvtColor(small,cv2.COLOR_BGR2RGB); sh,sw=small.shape[:2]
             hr=hands.process(rgb)
-            new_pts=[]; new_fs=[]; both_open=False
+            new_pts=[]; new_sign_pts=[]
             if hr.multi_hand_landmarks:
                 for hi,hlm in enumerate(hr.multi_hand_landmarks[:2]):
-                    pts={}; sm=self._smooth[hi]
+                    pts={}; raw_pts={}; sm=self._smooth[hi]
                     for i,lm in enumerate(hlm.landmark):
                         raw=np.array([lm.x*sw,lm.y*sh]); prev=sm.get(i,raw)
+                        raw_pts[i]=raw
                         s=A*raw+(1-A)*prev; sm[i]=s; pts[i]=s
-                    self._smooth[hi]=sm; new_pts.append(pts)
-                    fs=[]
-                    for tip,base in [(4,3),(8,5),(12,9),(16,13),(20,17)]:
-                        fs.append(bool(pts[tip][1]<pts[base][1]-5))
-                    new_fs.append(fs)
-                if len(new_fs)==2 and all(new_fs[0]) and all(new_fs[1]):
-                    both_open=True
+                    self._smooth[hi]=sm; new_pts.append(pts); new_sign_pts.append(raw_pts)
+            else:
+                self._smooth=[{},{}]
             try: self._fq.put_nowait(small)   # face mesh runs on its own thread now
             except queue.Full: pass
             if tiny is not None:
                 try: self._eq.put_nowait(tiny)
                 except queue.Full: pass
             with self._lk:
-                self.hand_pts=new_pts; self.fingers=new_fs; self.both_open=both_open
+                self.hand_pts=new_pts; self.sign_pts=new_sign_pts
                 self.num_hands=len(new_pts)
+                self.sequence+=1
 
     def _floop(self):
         face=mp.solutions.face_mesh.FaceMesh(static_image_mode=False,max_num_faces=1,
@@ -195,10 +154,9 @@ class BgDetector:
                     if idx<len(all_p): new_dots.append(all_p[idx])
                 xs=[p[0] for p in all_p]; ys=[p[1] for p in all_p]
                 new_box=(min(xs)-10,min(ys)-10,max(xs)+10,max(ys)+10)
-            if new_dots or new_box:
-                with self._lk:
-                    if new_dots: self.face_dots=new_dots
-                    if new_box:  self.face_box=new_box
+            with self._lk:
+                self.face_dots=new_dots
+                self.face_box=new_box
 
     def _emloop(self):
         df=None
@@ -225,17 +183,13 @@ class BgDetector:
                 except: pass
             else:
                 with self._lk:
-                    sc=self.emo_sc
-                    for k in sc: sc[k]=max(0,min(1,sc[k]+random.uniform(-0.01,0.01)))
-                    tot=sum(sc.values()) or 1
-                    for k in sc: sc[k]/=tot
-                    self.emotion=max(sc,key=sc.get)
+                    self.emotion="Unavailable"
+                    self.emo_sc={}
 
     def get(self):
         with self._lk:
-            return (list(self.hand_pts),list(self.fingers),self.both_open,
-                    self.num_hands,list(self.face_dots),self.face_box,
-                    self.emotion,dict(self.emo_sc))
+            return (list(self.hand_pts),list(self.sign_pts),self.num_hands,list(self.face_dots),self.face_box,
+                    self.emotion,dict(self.emo_sc),self.sequence)
 
     def draw_hands(self,img,hand_pts,sx,sy,fw,fh):
         for pts in hand_pts:
@@ -265,80 +219,87 @@ class BgDetector:
     def stop(self): self._run=False
 
 class Signs:
-    HOLD_TIME = 1.0   # was 1.5s — snappier locking, still resists flicker
-    GAP_TIME  = 0.25
+    GAP_TIME = 0.3
+    MIN_FRAMES = 18
+    STABLE_MATCHES = 3
 
-    def __init__(self):
-        self.words=[]; self._state="IDLE"; self._word=None
-        self._timer=0.0; self._gap=0.0; self.prog=0.0
+    def __init__(self, library):
+        self.library=library; self.words=[]; self.clip=[]
+        self._gap=0.0; self._state="IDLE"; self._word=None
+        self._candidate=None; self._matches=0; self.prog=0.0
 
-    def update(self, fingers, num_hands, dt):
-        word         = classify(fingers, num_hands) if num_hands > 0 else None
-        hand_present = (num_hands > 0)
+    def _commit(self, word):
+        self._word=word; self.words.append(word); self.words=self.words[-10:]
+        self._state="LOCKED"; self.clip=[]; self.prog=1.0
+        print(f"[RECOGNIZED] {word}")
+        return word
 
-        if self._state == "IDLE":
-            self.prog = 0.0
-            if word and hand_present:
-                self._word=word; self._timer=0.0; self._gap=0.0
-                self._state="HOLDING"
-
-        elif self._state == "HOLDING":
-            if word == self._word and hand_present:
-                self._timer += dt
-                self.prog = min(1.0, self._timer/self.HOLD_TIME)
-                if self._timer >= self.HOLD_TIME:
-                    self._state="LOCKED"; self.prog=1.0
-                    w=self._word; self.words.append(w)
-                    if len(self.words)>10: self.words=self.words[-10:]
-                    print(f"[LOCKED] {w}  →  {self.words}")
-                    return w
-            else:
-                self._word=word; self._timer=0.0; self.prog=0.0
-                if not (word and hand_present): self._state="IDLE"
-
-        elif self._state == "LOCKED":
-            self.prog = 0.0
-            # KEY FIX: physical absence only
-            if not hand_present:
-                self._gap += dt
-                if self._gap >= self.GAP_TIME:
-                    self._state="IDLE"; self._gap=0.0; self._word=None
-                    print("[READY] — make your next sign")
-            else:
-                self._gap = 0.0
-
+    def update(self, hand_pts, num_hands, dt, new_frame, width, height):
+        if num_hands:
+            self._gap=0.0
+            if self._state=="LOCKED" or not new_frame or not self.library.examples:
+                return None
+            frame=[[[float(p[i][0])/width,float(p[i][1])/height] for i in range(21)]
+                   for p in hand_pts]
+            self.clip.append(frame); self.clip=self.clip[-90:]
+            self._state="HOLDING"; self.prog=min(1.0,len(self.clip)/self.MIN_FRAMES)
+            if len(self.clip)>=self.MIN_FRAMES and len(self.clip)%2==0:
+                word=self.library.recognize(self.clip)
+                if word==self._candidate and word:
+                    self._matches+=1
+                else:
+                    self._candidate=word; self._matches=1 if word else 0
+                if self._matches>=self.STABLE_MATCHES:
+                    return self._commit(word)
+        elif self._state in ("HOLDING","LOCKED"):
+            self._gap+=dt
+            if self._gap>=self.GAP_TIME:
+                if self._state=="HOLDING":
+                    word=self.library.recognize(self.clip)
+                    if word:
+                        return self._commit(word)
+                self.clip=[]; self._state="IDLE"; self._word=None
+                self._candidate=None; self._matches=0; self._gap=0.0; self.prog=0.0
         return None
 
     @property
     def current(self): return self._word
+
     @property
-    def state(self):   return self._state
+    def state(self): return self._state
 
     def reset(self):
-        self.words=[]; self._state="IDLE"; self._word=None
-        self._timer=0.0; self._gap=0.0; self.prog=0.0
+        self.words=[]; self.clip=[]; self._state="IDLE"; self._word=None
+        self._gap=0.0; self._candidate=None; self._matches=0; self.prog=0.0
 
 # ── LLM ────────────────────────────────────────────────────────────────────────
 class LLM:
     def __init__(self):
+        self._lock=threading.Lock(); self._generation=0
         self._s=""; self._pending=False; self._done_words=[]
+        self._event=threading.Event()
 
     def request(self, words):
-        if self._pending: return
-        if list(words)==self._done_words: return
-        self._done_words=list(words); self._pending=True
-        threading.Thread(target=self._call,args=(list(words),),daemon=True).start()
+        snapshot=list(words)
+        with self._lock:
+            if snapshot==self._done_words and (self._pending or self._s):
+                return self._event
+            self._generation+=1; generation=self._generation
+            self._done_words=snapshot; self._pending=True; self._s=""
+            self._event=threading.Event(); event=self._event
+        threading.Thread(target=self._call,args=(snapshot,generation,event),daemon=True).start()
+        return event
 
     def get_blocking(self, words, timeout=4.0):
-        if self._s and self._done_words==list(words): return self._s
-        self._done_words=list(words); self._pending=True
-        threading.Thread(target=self._call,args=(list(words),),daemon=True).start()
-        dl=time.time()+timeout
-        while self._pending and time.time()<dl: time.sleep(0.05)
-        return self._s or self._fb(words)
+        event=self.request(words)
+        event.wait(timeout)
+        with self._lock:
+            if self._done_words==list(words) and self._s:
+                return self._s
+        return self._fb(words)
 
-    def _call(self, words):
-        g=" ".join(words)
+    def _call(self, words, generation, event):
+        sentence=self._fb(words)
         try:
             if API_KEY:
                 r=requests.post("https://api.anthropic.com/v1/messages",
@@ -346,45 +307,37 @@ class LLM:
                              "content-type":"application/json"},
                     json={"model":"claude-haiku-4-5-20251001","max_tokens":60,
                           "messages":[{"role":"user","content":
-                              f"Sign language gloss words. Make a natural English sentence "
-                              f"(max 12 words): {g}\nReply with ONLY the sentence."}]},
+                              "Render these recognized ASL glosses as a short English sentence. "
+                              "Preserve their order and meaning; do not add facts. "
+                              f"Glosses: {' '.join(words)}\nReply with ONLY the sentence."}]},
                     timeout=8)
-                d=r.json()
-                if "content" in d and d["content"]:
-                    self._s=d["content"][0]["text"].strip()
-                else: self._s=self._fb(words)
-            else: self._s=self._fb(words)
-        except: self._s=self._fb(words)
-        finally: self._pending=False
+                r.raise_for_status()
+                content=r.json().get("content",[])
+                if content and content[0].get("text"):
+                    sentence=content[0]["text"].strip()
+        except Exception as exc:
+            print(f"[INTERPRETATION FALLBACK] {exc}")
+        finally:
+            with self._lock:
+                if generation==self._generation:
+                    self._s=sentence; self._pending=False
+            event.set()
 
     def _fb(self, words):
-        w=[x.lower() for x in words]
-        combos=[
-            (["use","technology","for","help","not","war"],
-             "Use technology to create help, not war."),
-            (["use","technology","help","not","war"],
-             "Use technology to create help, not war."),
-            (["technology","for","help","not","war"],
-             "Use technology to create help, not war."),
-            (["use","technology","not","war"],
-             "Use technology for good, not war."),
-            (["use","technology","help"],   "Use technology to help people."),
-            (["technology","not","war"],    "Technology should help, not cause war."),
-            (["help","not","war"],          "Help people, not wage war."),
-            (["not","war"],                 "Choose peace, not war."),
-            (["use","technology"],          "Use technology for good."),
-        ]
-        for keys, sentence in combos:
-            if all(k in w for k in keys): return sentence
-        kw=[x for x in words if x.lower() not in {"and","the","a","is"}]
-        return (" ".join(kw[:6]).lower().capitalize()+"." if kw else "Sign language to voice.")
+        return " ".join(words).capitalize()+"." if words else ""
 
-    def reset(self): self._s=""; self._pending=False; self._done_words=[]
+    def reset(self):
+        with self._lock:
+            self._generation+=1; self._s=""; self._pending=False; self._done_words=[]
+            self._event.set(); self._event=threading.Event()
 
     @property
-    def sentence(self): return self._s
+    def sentence(self):
+        with self._lock: return self._s
+
     @property
-    def pending(self):  return self._pending
+    def pending(self):
+        with self._lock: return self._pending
 
 # ── VOICE ──────────────────────────────────────────────────────────────────────
 class Voice:
@@ -527,17 +480,7 @@ def ui_lock(img, word, state, prog, t):
         if filled>0: cv2.rectangle(img,(bx+15,by+48),(bx+15+filled,by+56),(60,180,60),-1)
         ptxt(img,f"{int(prog*100)}%  hold still...",(bx+15,by+66),0.30,(120,120,120),1,False)
     elif state=="LOCKED":
-        ptxt(img,"LOCKED! lower hand for next sign",(bx+15,by+66),0.30,(60,220,60),1,False)
-
-def ui_finish(img, prog, t):
-    h,iw=img.shape[:2]; bw=360; bh=70
-    bx=iw//2-bw//2; by=h-bh-115
-    prect(img,bx,by,bx+bw,by+bh,K,0.92,bc=(60,220,60))
-    pbold(img,"FINISH  -  hold both hands open",(bx+15,by+36),0.55,(60,220,60))
-    bar=bw-30; filled=int(bar*prog)
-    cv2.rectangle(img,(bx+15,by+46),(bx+15+bar,by+54),(40,40,40),-1)
-    if filled>0: cv2.rectangle(img,(bx+15,by+46),(bx+15+filled,by+54),(60,220,60),-1)
-    ptxt(img,f"{int(prog*100)}%",(bx+15,by+66),0.32,(120,200,120),1,False)
+        ptxt(img,"Recognized - make next sign",(bx+15,by+66),0.30,(60,220,60),1,False)
 
 def ui_emotion(img, scores, t):
     """RIGHT side overlay, positioned so it doesn't overlap bottom bar."""
@@ -547,6 +490,9 @@ def ui_emotion(img, scores, t):
     # sits just above bottom bar
     py=h-100-ph-12
     prect(img,px-4,py-8,px+pw+4,py+ph,K,0.82,bc=(50,50,50))
+    if not scores:
+        ptxt(img,"Emotion unavailable",(px,py+20),0.35,W,1,False)
+        return
     order=["Happy","Sad","Neutral","Angry","Questioning","Skeptical"]
     top=max(scores,key=scores.get) if scores else "Neutral"
     ey=py
@@ -559,11 +505,11 @@ def ui_emotion(img, scores, t):
         if bw2>0: cv2.rectangle(img,(px+90,ey+6),(px+90+bw2,ey+14),col,-1)
         ey+=26
 
-def ui_bottom(img, mode, speaking, t):
+def ui_bottom(img, mode, speaking, t, emotion_available):
     h,iw=img.shape[:2]; bh=100; by=h-bh
     prect(img,0,by,iw,h,(5,5,5),0.92)
     labels=["Hand\nTracking","Emotion\nDetection","LLM\nInterpretation","Voice\nOutput"]
-    active={"Hand\nTracking":True,"Emotion\nDetection":True,
+    active={"Hand\nTracking":True,"Emotion\nDetection":emotion_available,
             "LLM\nInterpretation":mode>=2,"Voice\nOutput":speaking}
     mw=iw//4
     for i,m in enumerate(labels):
@@ -588,17 +534,9 @@ def main():
     print("║        Zia's Glasses                ║")
     print("╚══════════════════════════════════════╝")
     print()
-    print("  YOUR 6 SIGNS:")
-    print("  peace-V       → USE")
-    print("  open hand     → TECHNOLOGY")
-    print("  point index   → FOR")
-    print("  thumbs up     → HELP")
-    print("  index+pinky   → NOT")
-    print("  fist          → WAR")
-    print()
-    print("  Hold 1.0s → LOCKED. Drop hand → next sign.")
-    print("  Both hands open 1.5s → FINISH → speaks sentence")
-    print("  C=clear  Q/ESC=quit\n")
+    print("  Record ASL examples first: python record_sign.py LABEL")
+    print("  Sign with one or two hands; recognition runs while you sign.")
+    print("  R=teach a sign  ENTER=speak sentence  C=clear  Q/ESC=quit\n")
 
     cap=cv2.VideoCapture(0)
     if not cap.isOpened(): print("no webcam"); sys.exit(1)
@@ -610,9 +548,12 @@ def main():
     cv2.namedWindow("Zia's Glasses", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Zia's Glasses", 1280, 720)
 
-    det=BgDetector(); signs=Signs(); llm=LLM(); voice=Voice()
+    det=BgDetector(); library=SignLibrary(); signs=Signs(library); llm=LLM(); voice=Voice()
+    print(f"  Loaded {sum(map(len, library.examples.values()))} examples for {len(library.examples)} labels")
     prev=time.time(); fps_s=30.0; t=0.0
-    sentence=""; mode=0; fin_timer=0.0; fin_done=False; FIN_THRESH=1.5   # was 2.0s — quicker sentence finish
+    sentence=""; mode=0; last_sequence=-1
+    teach_mode=None; teach_label=""; teach_clip=[]; teach_gap=0.0
+    teach_saved=0; teach_ready_at=0.0; notice=""; notice_until=0.0
     PW,PH=480,270   # mediapipe downscales to ~256px internally; smaller = faster handoff
 
     _clr=[False]
@@ -631,38 +572,46 @@ def main():
 
         small=cv2.resize(frame,(PW,PH)); tiny=cv2.resize(frame,(320,180))
         det.push(small,tiny)
-        hand_pts,fingers,both_open,num_hands,face_dots,face_box,emotion,emo_sc=det.get()
+        hand_pts,sign_pts,num_hands,face_dots,face_box,emotion,emo_sc,sequence=det.get()
         sx=FW/PW; sy=FH/PH
 
         if _clr[0]:
             _clr[0]=False; signs.reset(); llm.reset(); voice.reset()
-            sentence=""; mode=0; fin_timer=0.0; fin_done=False; print("[CLEAR]")
+            sentence=""; mode=0; print("[CLEAR]")
 
-        # FINISH gesture
-        fp=0.0
-        if both_open and signs.words:
-            fin_timer = min(fin_timer + dt, FIN_THRESH + 0.1); fp = min(1.0, fin_timer / FIN_THRESH)
-            if fp >= 1.0 and not fin_done:
-                print("[FINISH GESTURE DETECTED] Speaking full sentence...")
-                fin_done = True; mode = 3
-                final = llm.get_blocking(signs.words, timeout=4.0)
-                sentence = final
-                print(f"[SPEAK-FULL-DEBUG] {sentence}")
-                voice.sentence(sentence, force=True)  # Always speak full sentence on finish
-        else:
-            fin_timer=max(0.0,fin_timer-dt*2); fp=fin_timer/FIN_THRESH
-            if not both_open: fin_done=False
-
-        # word locking
-        show_finish=both_open and bool(signs.words)
-        if not both_open:
-            locked=signs.update(fingers,num_hands,dt)
-            if locked:
-                mode=max(mode,1); voice.word(locked)
-                llm.request(signs.words); mode=max(mode,2)
+        new_frame=sequence!=last_sequence
+        locked=None
+        if teach_mode=="capture":
+            if time.monotonic()>=teach_ready_at:
+                if num_hands and new_frame:
+                    sample=[[[float(p[i][0])/PW,float(p[i][1])/PH] for i in range(21)]
+                            for p in sign_pts]
+                    teach_clip.append(sample); teach_clip=teach_clip[-90:]
+                    teach_gap=0.0
+                elif not num_hands and teach_clip:
+                    teach_gap+=dt
+                    if teach_gap>=0.3:
+                        try:
+                            library.add(teach_label,teach_clip)
+                            teach_saved+=1
+                            notice=f"Saved {teach_saved}/5 for {teach_label}"
+                            if teach_saved>=5:
+                                teach_mode=None
+                                notice=f"Learned {teach_label}. Try signing it now."
+                            teach_ready_at=time.monotonic()+0.8
+                        except ValueError as exc:
+                            notice=f"Try again: {exc}"
+                        notice_until=time.monotonic()+4
+                        teach_clip=[]; teach_gap=0.0
+        elif teach_mode is None:
+            locked=signs.update(sign_pts,num_hands,dt,new_frame,PW,PH)
+        last_sequence=sequence
+        if locked:
+            mode=max(mode,1); voice.word(locked)
+            sentence=""; llm.request(signs.words); mode=max(mode,2)
 
         bg=llm.sentence
-        if bg and bg!=sentence and not fin_done:
+        if bg and bg!=sentence:
             sentence=bg; mode=max(mode,2)
 
         # draw
@@ -670,21 +619,55 @@ def main():
         det.draw_face(dark,face_dots,face_box,emotion,sx,sy,FW,FH)
         det.draw_hands(dark,hand_pts,sx,sy,FW,FH)
 
-        if show_finish or fin_timer>0.05: ui_finish(dark,fp,t)
-        else: ui_lock(dark,signs.current,signs.state,signs.prog,t)
+        if teach_mode=="label":
+            ptxt(dark,f"Teach Sign: type a label [{teach_label}] then ENTER; ESC cancels",(25,FH-125),0.48,W)
+        elif teach_mode=="capture":
+            message=f"Teach {teach_label}: {teach_saved}/5 | sign, then lower hands"
+            if time.monotonic()<teach_ready_at: message="Get ready to sign..."
+            ptxt(dark,message,(25,FH-125),0.55,W)
+        elif not library.examples:
+            ptxt(dark,"No signs learned. Press R to teach one.",(25,FH-125),0.55,W)
+        elif signs.state=="HOLDING":
+            ptxt(dark,"Looking for a trained ASL sign...",(25,FH-125),0.55,W)
+        elif signs.current:
+            ui_lock(dark,signs.current,"LOCKED",0,t)
 
+        if notice and time.monotonic()<notice_until:
+            ptxt(dark,notice,(25,FH-165),0.48,C)
         ui_emotion(dark,emo_sc,t)
         ui_sentence(dark,sentence,llm.pending,t)
         ui_top(dark,signs.words,signs.current,signs.state,signs.prog,t)
-        ui_bottom(dark,mode,voice.speaking,t)
+        ui_bottom(dark,mode,voice.speaking,t,bool(emo_sc))
         ptxt(dark,f"FPS {fps_s:.0f}",(FW-72,FH-110),0.36,(100,100,100),1,False)
 
         cv2.imshow("Zia's Glasses",dark)
         key=cv2.waitKey(1)&0xFF
-        if key in (ord('q'),ord('Q'),27): break
+        if teach_mode=="label":
+            if key==27:
+                teach_mode=None
+            elif key in (8,127):
+                teach_label=teach_label[:-1]
+            elif key in (13,10) and teach_label.strip():
+                teach_label=teach_label.strip().upper()
+                teach_mode="capture"; teach_saved=0; teach_clip=[]
+                teach_gap=0.0; teach_ready_at=time.monotonic()+1.0
+            elif 32<=key<=126 and len(teach_label)<40:
+                char=chr(key).upper()
+                if char.isalnum() or char in " -'":
+                    teach_label+=char
+        elif teach_mode=="capture":
+            if key in (ord('q'),ord('Q'),27):
+                teach_mode=None; teach_clip=[]
+        elif key in (ord('q'),ord('Q'),27): break
+        elif key in (ord('r'),ord('R')):
+            teach_mode="label"; teach_label=""; teach_clip=[]
+            signs.reset(); llm.reset(); sentence=""; mode=0
+        elif key in (13,10) and signs.words:
+            sentence=llm.get_blocking(signs.words,timeout=4.0)
+            voice.sentence(sentence,force=True); mode=3
         elif key in (ord('c'),ord('C')):
             signs.reset(); llm.reset(); voice.reset()
-            sentence=""; mode=0; fin_timer=0.0; fin_done=False; print("[CLEAR]")
+            sentence=""; mode=0; print("[CLEAR]")
 
     det.stop(); cap.release(); cv2.destroyAllWindows(); print("Bye!")
 

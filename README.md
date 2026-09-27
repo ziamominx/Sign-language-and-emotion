@@ -1,47 +1,39 @@
 # Zia's Glasses
 
-## dev/creator: Zia (ziamo)
+A Windows webcam prototype for recording and recognizing **isolated ASL signs** from hand landmarks, speaking recognized glosses, and optionally showing facial emotion analysis. It is not a complete ASL interpreter. There is no bundled trained vocabulary, and a gloss is not the same as an ASL sentence.
 
-## What is this project?
-Zia's Glasses is a real-time sign language to voice system. It uses your webcam to recognize specific hand gestures (signs) and translates them into spoken English sentences. The project is designed to help bridge communication between sign language users and others by providing instant voice output for a set of defined signs.
+## What changed
 
-### Key Features
-- Recognizes 6 main hand signs (USE, TECHNOLOGY, FOR, HELP, NOT, WAR) and several extras
-- Hold each sign for 1.5 seconds to lock and speak the word
-- Raise both hands open for 2 seconds to speak the full interpreted sentence
-- Real-time webcam-based hand and face tracking
-- Emotion detection overlay
-- Voice output using text-to-speech
+The earlier version mapped finger-up patterns to words such as `HELP` and `WAR`. Those patterns were not validated ASL signs, and nearest-pattern guessing could produce a word for an unknown gesture. The app now compares the **full movement of one or two hands** with examples that you record. It checks a short sequence while you sign and returns a label only when at least three examples exist and repeated matches pass distance and ambiguity checks. Lowering your hands lets you start the next sign. Unknown signs remain unknown. Examples are stored locally under `sign_examples/`; that directory is excluded from Git because recordings may be personal.
 
-## How to fork and run
-1. **Fork the repository**
-   - Click the "Fork" button on the top right of the GitHub page to create your own copy.
-2. **Clone your fork**
-   - Open a terminal and run:
-     ```
-     git clone https://github.com/YOUR-USERNAME/zias-glasses.git
-     cd zias-glasses
-     ```
-3. **Install Python 3.8+**
-   - Make sure you have Python 3.8 or newer installed.
-4. **Install dependencies**
-   - The script will auto-install required packages on first run, but you can also run:
-     ```
-     pip install opencv-python==4.9.0.80 mediapipe==0.10.14 numpy pyttsx3 requests deepface
-     ```
-5. **Run the program**
-   - Start the app with:
-     ```
-     python zias_glasses.py
-     ```
-   - Make sure your webcam is connected and accessible.
+The matcher uses MediaPipe's 21 landmarks per hand and normalizes for hand position and size. It does **not** yet model facial grammar, upper-body posture, continuous signing, or signer-independent variations. Its thresholds are conservative starting values, not measured accuracy guarantees. To evaluate reliability, collect examples from multiple signers and hold out test recordings for each label before using it for communication decisions.
 
-## Relevant Links
-- [Mediapipe documentation](https://google.github.io/mediapipe/solutions/hands.html)
-- [OpenCV documentation](https://docs.opencv.org/)
-- [pyttsx3 documentation](https://pyttsx3.readthedocs.io/)
-- [DeepFace documentation](https://github.com/serengil/deepface)
+## Setup (Windows)
 
----
+1. Install Python 3.10 and connect a webcam.
+2. Install dependencies: `py -3.10 -m pip install -r requirements.txt`.
+3. Optional emotion overlay: `py -3.10 -m pip install deepface`. If DeepFace is unavailable, the overlay says so rather than inventing scores.
+4. Optional English sentence rewriting: set `ANTHROPIC_API_KEY`. Without it, speech uses the recognized glosses in order. This option sends gloss text to the API; webcam frames and recorded examples stay local.
 
-This project is for educational and assistive technology purposes. For questions or contributions, fork and submit a pull request.
+The program can also install missing core packages on first run. Explicit installation is recommended so errors are visible.
+
+## Build a vocabulary
+
+In the webcam app, press **R**, type a verified ASL sign label such as `HELLO`, and press **Enter**. Make the isolated sign, then lower both hands to save that example. Repeat five times. Recognition becomes available immediately after training; you do not need to restart the app. Press **Esc** during teaching to cancel.
+
+You can also record examples with the separate tool. Record an ASL sign verified with a fluent signer or reliable ASL reference:
+
+```powershell
+py -3.10 record_sign.py HELLO --count 5
+py -3.10 record_sign.py HELP --count 5
+```
+
+In the recording window, make one isolated sign, then lower both hands. Repeat until five examples are saved. Use consistent camera framing and lighting, but vary speed and position naturally. Record at least three examples for every label; five or more are recommended. Collect examples from the intended users. Use a different sign language only with examples from that language and a separate vocabulary directory.
+
+Run `py -3.10 zias_glasses.py` (or `run.bat`). Make a sign and watch for recognition while your hands are visible. Lower your hands between signs to reset, then repeat. Press **R** to teach a sign, **Enter** to speak the current gloss sequence, **C** or the Clear button to reset, and **Q/Esc** to quit. The app also speaks each recognized word. If it prints `[UNKNOWN]`, record better examples or adjust framing; it will not guess a word.
+
+## Scope and next steps
+
+ASL uses movements of the hands and face and has grammar distinct from English. No finite finger-pattern table can cover all ASL. Expanding toward broad communication needs a verified ASL corpus, a model trained on sign videos, signer-independent evaluation, nonmanual features, and continuous-sign segmentation. The [WLASL project](https://github.com/dxli94/WLASL) provides a research dataset with 2,000 word classes and pretrained-model resources, subject to its data agreement. A future model should be evaluated on people absent from training before it replaces the local-example recognizer.
+
+Run core tests with `py -3.10 -m unittest -v test_sign_recognition.py`. Webcam capture, speech, and model accuracy require checks on the target computer with real signers.
