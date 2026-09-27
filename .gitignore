@@ -4,3 +4,4 @@ __pycache__/
 sign_examples/
 .models/
 arena.sqlite3
+server.log
