@@ -17,6 +17,8 @@ Click **Start live translation**, allow camera access, and frame your upper body
 
 The camera now draws tracked hand joints and finger lines over the live view. To finish, hold **both hands open for 1.5 seconds** after at least one word is in the message. A progress indicator appears, then the website shows and speaks the whole collected message. The finish gesture does not add a sign and does not paraphrase or invent words. Lower either hand before using the gesture again. The **Speak message** button remains available as a fallback.
 
+The hand overlay uses a higher-accuracy tracker on a separate, smaller camera frame at the camera's native aspect ratio. It is aligned to the visible video rectangle and animated between detections for less jitter. **Show facial expression estimate** uses the optional DeepFace model from the older desktop project. It checks for a real face before analysis and updates independently of sign recognition, about once every three seconds. On this computer the model is already installed and cached. To enable it elsewhere, run `py -3.10 -m pip install -r requirements-emotion.txt`; the first run may download DeepFace's expression weights. If unavailable, the website disables the expression control. The label is an uncertain visual estimate of facial expression, not a measure of someone's actual emotion. Camera frames and expression results remain on the local server.
+
 The site checks consecutive predictions before automatically adding a word. If hands or the upper body are lost, it shows specific framing guidance. An independent hand detector can recover hands missed by the main body tracker; this adds roughly 0.35 seconds to a 16-frame clip when needed on the tested machine.
 
 ### Optional fingerspelling
@@ -33,4 +35,4 @@ The [National Institute on Deafness and Other Communication Disorders](https://w
 
 ## Development checks
 
-Run `py -3.10 -m unittest -v test_sign_recognition.py test_asl_model.py test_alphabet_model.py test_alphabet_api.py test_hand_tracking.py` and `node --test test_sign_stability.js test_letter_stability.js test_finish_gesture.js` for the recognizer, model adapters, hand tracking, and temporal gates. For a live check, open the site, grant camera access, sign a known isolated word, then hold both hands open to speak the message. Camera and speech access depend on the browser and target device.
+Run `py -3.10 -m unittest -v test_sign_recognition.py test_asl_model.py test_alphabet_model.py test_alphabet_api.py test_hand_tracking.py test_emotion_api.py` and `node --test test_sign_stability.js test_letter_stability.js test_finish_gesture.js test_hand_geometry.js` for the recognizer, model adapters, hand tracking, expression API, overlay geometry, and temporal gates. For a live check, open the site, grant camera access, sign a known isolated word, then hold both hands open to speak the message. Camera and speech access depend on the browser and target device.

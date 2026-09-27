@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from contextlib import ExitStack
+from importlib.util import find_spec
+import os
 from threading import Lock, RLock
 from time import perf_counter
 
@@ -33,7 +35,7 @@ def get_tracker():
         with tracker_lock:
             if tracker is None:
                 tracker = mp.solutions.hands.Hands(
-                    static_image_mode=False, max_num_hands=2, model_complexity=0,
+                    static_image_mode=False, max_num_hands=2, model_complexity=1,
                     min_detection_confidence=0.55, min_tracking_confidence=0.5)
     return tracker
 
@@ -47,6 +49,23 @@ def _open_palm(landmarks):
         pip_distance = np.linalg.norm(np.array([landmarks[pip].x, landmarks[pip].y]) - wrist)
         extended += tip_distance > pip_distance * 1.18
     return extended == 4
+
+
+def classify_expression(face_image):
+    """Classify a detected face crop; never infer emotion from a blank frame."""
+    # DeepFace logs emoji during import, which crashes under Windows cp1252.
+    os.environ.setdefault("DEEPFACE_LOG_LEVEL", "60")
+    from deepface import DeepFace
+
+    analysis = DeepFace.analyze(face_image, actions=["emotion"],
+                                detector_backend="skip", enforce_detection=False,
+                                silent=True)
+    if isinstance(analysis, list):
+        analysis = analysis[0]
+    label = str(analysis["dominant_emotion"]).lower()
+    if label not in {"angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"}:
+        raise ValueError("Unknown expression label")
+    return label.capitalize()
 
 
 def get_recognizer():
@@ -204,6 +223,49 @@ def track_hands():
     except Exception:
         app.logger.exception("Hand tracking failed")
         return jsonify({"error": "Hand tracking failed"}), 500
+
+
+@app.get("/api/emotion/status")
+def emotion_status():
+    available = find_spec("deepface") is not None
+    return jsonify({"ready": available,
+                    "error": None if available else "Install optional DeepFace support to show facial expressions"})
+
+
+@app.post("/api/emotion")
+def emotion_predict():
+    """Estimate a facial expression only when a face is actually detected."""
+    if find_spec("deepface") is None:
+        return jsonify({"error": "Facial expression model is not installed"}), 503
+    upload = request.files.get("frame")
+    if upload is None:
+        return jsonify({"error": "Send one JPEG camera frame in the frame field"}), 400
+    data = upload.read()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "The camera frame must be a JPEG image"}), 422
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or min(image.shape[:2]) < 120:
+        return jsonify({"error": "The camera frame could not be read"}), 422
+    height, width = image.shape[:2]
+    try:
+        with mp.solutions.face_detection.FaceDetection(
+                model_selection=0, min_detection_confidence=0.6) as detector:
+            found = detector.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if not found.detections:
+            return jsonify({"visible": False, "label": None})
+        box = found.detections[0].location_data.relative_bounding_box
+        pad_x, pad_y = box.width * 0.15, box.height * 0.15
+        x1 = max(0, int((box.xmin - pad_x) * width))
+        y1 = max(0, int((box.ymin - pad_y) * height))
+        x2 = min(width, int((box.xmin + box.width + pad_x) * width))
+        y2 = min(height, int((box.ymin + box.height + pad_y) * height))
+        if x2 - x1 < 48 or y2 - y1 < 48:
+            return jsonify({"visible": False, "label": None})
+        label = classify_expression(image[y1:y2, x1:x2])
+        return jsonify({"visible": True, "label": label})
+    except Exception:
+        app.logger.exception("Facial expression analysis failed")
+        return jsonify({"error": "Facial expression analysis unavailable"}), 503
 
 
 @app.post("/api/alphabet/predict")

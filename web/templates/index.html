@@ -9,6 +9,7 @@
   <script src="{{ url_for('static', filename='sign_stability.js') }}" defer></script>
   <script src="{{ url_for('static', filename='letter_stability.js') }}" defer></script>
   <script src="{{ url_for('static', filename='finish_gesture.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='hand_geometry.js') }}" defer></script>
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
@@ -38,10 +39,11 @@
             <div class="camera-placeholder" id="camera-placeholder" aria-hidden="true"><div class="placeholder-glyph">✳</div><p>Camera preview appears here</p></div>
             <div class="frame-corner corner-tl"></div><div class="frame-corner corner-tr"></div><div class="frame-corner corner-bl"></div><div class="frame-corner corner-br"></div>
             <div class="live-result" aria-live="off"><span>LIVE RECOGNITION</span><strong id="live-guess">Camera off</strong><small id="live-detail">Start live translation</small></div>
+            <div id="emotion-panel" class="emotion-panel" hidden><span>FACIAL EXPRESSION</span><strong id="emotion-label">Checking…</strong><small id="emotion-detail">Estimated from your face</small></div>
             <div id="finish-indicator" class="finish-indicator" hidden>Hold both hands open to speak message <strong id="finish-progress">0%</strong></div>
           </div>
           <div class="camera-actions"><button class="button button-primary" id="camera-button" type="button" disabled>Start live translation</button><button class="button button-light" id="capture-button" type="button" disabled>Pause translation</button></div>
-          <p class="camera-hint"><span id="framing-hint">Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.</span> <label class="speech-toggle"><input id="auto-speak" type="checkbox" checked> Speak recognized words aloud</label></p>
+          <p class="camera-hint"><span id="framing-hint">Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.</span> <label class="speech-toggle"><input id="auto-speak" type="checkbox" checked> Speak recognized words aloud</label> <label class="speech-toggle"><input id="show-emotion" type="checkbox" checked> Show facial expression estimate</label></p>
           <p id="mode-hint" class="mode-hint">ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat a word. Hold both hands open for 1.5 seconds to speak the full message.</p>
         </section>
 
@@ -56,7 +58,7 @@
       </div>
 
       <p id="status-message" class="status-message" role="status" aria-live="polite">Loading the ASL model…</p>
-      <section class="model-note" aria-labelledby="model-note-title"><span class="note-symbol" aria-hidden="true">i</span><div><h2 id="model-note-title">About live recognition</h2><p>Hand landmarks show tracking feedback. Hold both open hands for 1.5 seconds to speak the collected words as a sentence; the gesture does not add a new word. ASL words uses an isolated 2,000-word research vocabulary. Optional fingerspelling is experimental; J and Z involve movement and are not added automatically. Neither mode translates continuous ASL grammar or every sign. Review the message before using it for important communication.</p></div></section>
+      <section class="model-note" aria-labelledby="model-note-title"><span class="note-symbol" aria-hidden="true">i</span><div><h2 id="model-note-title">About live recognition</h2><p>Hand landmarks show tracking feedback. Hold both open hands for 1.5 seconds to speak the collected words as a sentence; the gesture does not add a new word. The facial expression label is an uncertain visual estimate, not a measure of what someone feels. ASL words uses an isolated 2,000-word research vocabulary; fingerspelling is experimental. Neither mode translates continuous ASL grammar or every sign. Review the message before using it for important communication.</p></div></section>
     </main>
     <footer><span>ZIA'S GLASSES / ASL TO VOICE</span><span>Built for clearer conversations.</span></footer>
   </div>

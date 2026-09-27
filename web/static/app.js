@@ -12,11 +12,17 @@ const canvas = document.createElement('canvas');
 canvas.width = 640;
 canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
+const trackingCanvas = document.createElement('canvas');
+const trackingContext = trackingCanvas.getContext('2d', {alpha: false});
+const emotionCanvas = document.createElement('canvas');
+const emotionContext = emotionCanvas.getContext('2d', {alpha: false});
 const overlay = $('#hand-overlay');
 const overlayContext = overlay.getContext('2d');
 let stream = null, modelReady = false, paused = false, timer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
 let tracking = false, trackingController = null, lastTrackedAt = 0, finishHolding = false;
+let targetHands = [], displayedHands = [], overlayFrame = null, lastOverlayFrame = 0;
+let emotionReady = false, emotionBusy = false, emotionController = null, lastEmotionAt = 0;
 const stability = new SignStability();
 const letterStability = new LetterStability();
 const finishGesture = new FinishGesture();
@@ -24,12 +30,29 @@ const HAND_BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
   [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],
   [13,17],[0,17],[17,18],[18,19],[19,20]];
 
-function drawHands(hands = []) {
+function fitOverlay() {
+  const rect = containedVideoRect(frame.clientWidth, frame.clientHeight,
+    camera.videoWidth, camera.videoHeight);
+  if (!rect) return;
+  overlay.style.left = `${rect.left}px`;
+  overlay.style.top = `${rect.top}px`;
+  overlay.style.width = `${rect.width}px`;
+  overlay.style.height = `${rect.height}px`;
+  overlay.width = trackingCanvas.width;
+  overlay.height = trackingCanvas.height;
+}
+
+function renderHandOverlay(now) {
+  if (!stream) return;
+  const dt = lastOverlayFrame ? Math.min(100, now - lastOverlayFrame) : 16;
+  lastOverlayFrame = now;
+  const fraction = 1 - Math.exp(-dt / 45);
+  displayedHands = easeHands(displayedHands, targetHands, fraction);
   overlayContext.clearRect(0, 0, overlay.width, overlay.height);
   overlayContext.lineWidth = 2.5;
   overlayContext.strokeStyle = '#d6ed76';
   overlayContext.fillStyle = '#f2f9d2';
-  for (const hand of hands) {
+  for (const hand of displayedHands) {
     if (hand.length !== 21) continue;
     for (const [a, b] of HAND_BONES) {
       overlayContext.beginPath();
@@ -44,6 +67,13 @@ function drawHands(hands = []) {
       overlayContext.fill();
     });
   }
+  overlayFrame = requestAnimationFrame(renderHandOverlay);
+}
+
+function resetHandOverlay() {
+  targetHands = [];
+  displayedHands = [];
+  overlayContext.clearRect(0, 0, overlay.width, overlay.height);
 }
 
 function showSentence() {
@@ -153,12 +183,15 @@ function clearRecognition() {
   letterStability.resetCandidate();
   controller?.abort();
   trackingController?.abort();
+  emotionController?.abort();
+  emotionController = null;
+  emotionBusy = false;
   trackingController = null;
   tracking = false;
   finishHolding = false;
   finishGesture.reset();
   $('#finish-indicator').hidden = true;
-  drawHands();
+  resetHandOverlay();
   controller = null;
   generation++;
   analyzing = false;
@@ -210,6 +243,23 @@ async function checkAlphabet() {
   }
 }
 
+async function checkEmotion() {
+  try {
+    const response = await fetch('/api/emotion/status');
+    const data = await response.json();
+    emotionReady = response.ok && data.ready;
+    if (!emotionReady) {
+      $('#show-emotion').checked = false;
+      $('#show-emotion').disabled = true;
+      $('#show-emotion').title = data.error || 'Facial expression model unavailable';
+    }
+  } catch {
+    $('#show-emotion').checked = false;
+    $('#show-emotion').disabled = true;
+    $('#show-emotion').title = 'Facial expression model unavailable';
+  }
+}
+
 async function checkModel() {
   try {
     const response = await fetch('/api/status');
@@ -239,10 +289,18 @@ async function startCamera() {
     stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 960}, height: {ideal: 720}, aspectRatio: {ideal: 4 / 3}, facingMode: 'user'}});
     camera.srcObject = stream;
     await camera.play();
+    trackingCanvas.width = Math.max(320, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
+    trackingCanvas.height = Math.round(trackingCanvas.width * camera.videoHeight / camera.videoWidth);
+    emotionCanvas.width = 480;
+    emotionCanvas.height = Math.round(480 * camera.videoHeight / camera.videoWidth);
+    fitOverlay();
+    lastOverlayFrame = 0;
+    overlayFrame = requestAnimationFrame(renderHandOverlay);
     stream.getVideoTracks()[0].addEventListener('ended', stopCamera, {once: true});
     $('#camera-placeholder').hidden = true;
     paused = false;
     updateControls();
+    $('#emotion-panel').hidden = !emotionReady || !$('#show-emotion').checked;
     $('#live-guess').textContent = recognitionMode === 'letters' ? 'Watching for a hand' : 'Watching for a sign';
     $('#live-detail').textContent = recognitionMode === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
     announce(recognitionMode === 'letters'
@@ -262,6 +320,9 @@ function stopCamera() {
   if (timer) clearInterval(timer);
   timer = null;
   clearRecognition();
+  if (overlayFrame !== null) cancelAnimationFrame(overlayFrame);
+  overlayFrame = null;
+  $('#emotion-panel').hidden = true;
   stability.rearm();
   letterStability.rearm();
   stream?.getTracks().forEach(track => track.stop());
@@ -280,6 +341,15 @@ async function sampleFrame() {
   if (!stream || paused || sampling || camera.readyState < 2) return;
   sampling = true;
   try {
+    if (!tracking && Date.now() - lastTrackedAt >= 110) {
+      lastTrackedAt = Date.now();
+      trackHands();
+    }
+    if (emotionReady && $('#show-emotion').checked && !emotionBusy &&
+        Date.now() - lastEmotionAt >= 3000) {
+      lastEmotionAt = Date.now();
+      recognizeEmotion();
+    }
     const scale = Math.min(canvas.width / camera.videoWidth, canvas.height / camera.videoHeight);
     const width = camera.videoWidth * scale, height = camera.videoHeight * scale;
     context.fillStyle = '#000';
@@ -287,10 +357,6 @@ async function sampleFrame() {
     context.drawImage(camera, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.65));
     if (!blob || !stream || paused) return;
-    if (!tracking && Date.now() - lastTrackedAt >= 180) {
-      lastTrackedAt = Date.now();
-      trackHands(blob);
-    }
     samples.push(blob);
     if (samples.length > 16) samples.shift();
     if (!analyzing && !finishHolding) {
@@ -304,9 +370,15 @@ async function sampleFrame() {
   }
 }
 
-async function trackHands(blob) {
+async function trackHands() {
   tracking = true;
   const run = generation;
+  trackingContext.drawImage(camera, 0, 0, trackingCanvas.width, trackingCanvas.height);
+  const blob = await new Promise(resolve => trackingCanvas.toBlob(resolve, 'image/jpeg', 0.7));
+  if (!blob || run !== generation || !stream || paused) {
+    tracking = false;
+    return;
+  }
   const form = new FormData();
   form.append('frame', blob, 'hands.jpg');
   trackingController = new AbortController();
@@ -315,7 +387,7 @@ async function trackHands(blob) {
     if (!response.ok) return;
     const data = await response.json();
     if (run !== generation || !stream || paused) return;
-    drawHands(data.hands);
+    targetHands = (data.hands || []).sort((a, b) => a[0][0] - b[0][0]);
     const hasMessage = Boolean(messageText());
     const wasFinishing = finishHolding;
     finishHolding = Boolean(data.finish_gesture && hasMessage);
@@ -337,7 +409,7 @@ async function trackHands(blob) {
     }
   } catch (error) {
     if (error.name !== 'AbortError' && run === generation) {
-      drawHands();
+      resetHandOverlay();
       finishHolding = false;
       finishGesture.reset();
       $('#finish-indicator').hidden = true;
@@ -346,6 +418,41 @@ async function trackHands(blob) {
     if (run === generation) {
       tracking = false;
       trackingController = null;
+    }
+  }
+}
+
+async function recognizeEmotion() {
+  emotionBusy = true;
+  const run = generation;
+  emotionContext.drawImage(camera, 0, 0, emotionCanvas.width, emotionCanvas.height);
+  const blob = await new Promise(resolve => emotionCanvas.toBlob(resolve, 'image/jpeg', 0.65));
+  if (!blob || run !== generation || !stream || paused) {
+    emotionBusy = false;
+    return;
+  }
+  const form = new FormData();
+  form.append('frame', blob, 'face.jpg');
+  emotionController = new AbortController();
+  try {
+    const response = await fetch('/api/emotion', {method: 'POST', body: form,
+      signal: emotionController.signal});
+    const data = await response.json();
+    if (run !== generation || !stream || paused || !$('#show-emotion').checked) return;
+    if (!response.ok) throw new Error(data.error || 'Expression analysis unavailable');
+    $('#emotion-panel').hidden = false;
+    $('#emotion-label').textContent = data.visible ? data.label : 'No face detected';
+    $('#emotion-detail').textContent = data.visible ? 'Visual estimate · may be wrong' : 'Keep your face in view';
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) {
+      $('#emotion-label').textContent = 'Unavailable';
+      $('#emotion-detail').textContent = 'Expression model could not respond';
+      $('#emotion-panel').hidden = false;
+    }
+  } finally {
+    if (run === generation) {
+      emotionBusy = false;
+      emotionController = null;
     }
   }
 }
@@ -435,6 +542,13 @@ async function recognizeLetter(blob) {
 startButton.addEventListener('click', () => stream ? stopCamera() : startCamera());
 $('#mode-words').addEventListener('click', () => setMode('words'));
 $('#mode-letters').addEventListener('click', () => setMode('letters'));
+$('#show-emotion').addEventListener('change', () => {
+  $('#emotion-panel').hidden = !stream || !$('#show-emotion').checked;
+  if ($('#show-emotion').checked) lastEmotionAt = 0;
+  else emotionController?.abort();
+});
+window.addEventListener('resize', fitOverlay);
+camera.addEventListener('resize', fitOverlay);
 pauseButton.addEventListener('click', () => {
   if (!stream) return;
   paused = !paused;
@@ -471,3 +585,4 @@ renderSuggestions();
 updateControls();
 checkModel();
 checkAlphabet();
+checkEmotion();
