@@ -17,4 +17,14 @@ function easeHands(current, target, fraction) {
   ]));
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = {containedVideoRect, easeHands};
+/* The word model was trained on 640×480 frames with the camera letterboxed. */
+function letterboxLandmarks(points, videoWidth, videoHeight) {
+  const rect = containedVideoRect(640, 480, videoWidth, videoHeight);
+  if (!rect) return [];
+  return points.map(([x, y]) => [
+    (rect.left + x * rect.width) / 640,
+    (rect.top + y * rect.height) / 480,
+  ]);
+}
+
+if (typeof module !== 'undefined' && module.exports) module.exports = {containedVideoRect, easeHands, letterboxLandmarks};

@@ -14,15 +14,18 @@ canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
 const trackingCanvas = document.createElement('canvas');
 const trackingContext = trackingCanvas.getContext('2d', {alpha: false});
+const poseCanvas = document.createElement('canvas');
+const poseContext = poseCanvas.getContext('2d', {alpha: false});
 const faceCanvas = document.createElement('canvas');
 const faceContext = faceCanvas.getContext('2d', {alpha: false});
 const emotionCanvas = document.createElement('canvas');
 const emotionContext = emotionCanvas.getContext('2d', {alpha: false});
 const overlay = $('#hand-overlay');
 const overlayContext = overlay.getContext('2d');
-let stream = null, modelReady = false, paused = false, timer = null, handTimer = null, faceTimer = null;
+let stream = null, modelReady = false, paused = false, timer = null, handTimer = null, faceTimer = null, poseTimer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
 let tracking = false, trackingController = null, finishHolding = false;
+let poseTracking = false, poseController = null, latestPose = null, latestPoseAt = 0, lastWordAnalysisAt = 0;
 let faceTracking = false, faceController = null;
 let targetHands = [], displayedHands = [], overlayFrame = null, lastOverlayFrame = 0;
 let targetFace = [], displayedFace = [];
@@ -223,16 +226,22 @@ function renderSuggestions(items = []) {
 
 function clearRecognition() {
   samples = [];
+  latestPose = null;
+  latestPoseAt = 0;
+  lastWordAnalysisAt = 0;
   stability.resetCandidate();
   letterStability.resetCandidate();
   controller?.abort();
   trackingController?.abort();
+  poseController?.abort();
   faceController?.abort();
   emotionController?.abort();
   emotionController = null;
   emotionBusy = false;
   trackingController = null;
   tracking = false;
+  poseController = null;
+  poseTracking = false;
   faceController = null;
   faceTracking = false;
   finishHolding = false;
@@ -338,6 +347,8 @@ async function startCamera() {
     await camera.play();
     trackingCanvas.width = Math.max(480, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
     trackingCanvas.height = Math.round(trackingCanvas.width * camera.videoHeight / camera.videoWidth);
+    poseCanvas.width = trackingCanvas.width;
+    poseCanvas.height = trackingCanvas.height;
     faceCanvas.width = Math.max(720, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
     faceCanvas.height = Math.round(faceCanvas.width * camera.videoHeight / camera.videoWidth);
     emotionCanvas.width = 480;
@@ -357,6 +368,7 @@ async function startCamera() {
       : 'Live translation started. Sign in the camera area.');
     timer = setInterval(sampleFrame, 110);
     handTimer = setInterval(trackHands, 60);
+    poseTimer = setInterval(trackPose, 100);
     faceTimer = setInterval(trackFace, 50);
   } catch (error) {
     stream?.getTracks().forEach(track => track.stop());
@@ -370,9 +382,11 @@ async function startCamera() {
 function stopCamera() {
   if (timer) clearInterval(timer);
   if (handTimer) clearInterval(handTimer);
+  if (poseTimer) clearInterval(poseTimer);
   if (faceTimer) clearInterval(faceTimer);
   timer = null;
   handTimer = null;
+  poseTimer = null;
   faceTimer = null;
   clearRecognition();
   if (overlayFrame !== null) cancelAnimationFrame(overlayFrame);
@@ -401,6 +415,7 @@ async function sampleFrame() {
       lastEmotionAt = Date.now();
       recognizeEmotion();
     }
+    if (recognitionMode === 'words') return;
     const scale = Math.min(canvas.width / camera.videoWidth, canvas.height / camera.videoHeight);
     const width = camera.videoWidth * scale, height = camera.videoHeight * scale;
     context.fillStyle = '#000';
@@ -408,12 +423,7 @@ async function sampleFrame() {
     context.drawImage(camera, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.65));
     if (!blob || !stream || paused) return;
-    samples.push(blob);
-    if (samples.length > 16) samples.shift();
-    if (!analyzing && !finishHolding) {
-      if (recognitionMode === 'letters') recognizeLetter(blob);
-      else if (samples.length === 16) recognizeLive([...samples]);
-    }
+    if (!analyzing && !finishHolding) recognizeLetter(blob);
   } catch (error) {
     announce(`Could not read camera: ${error.message}`, true);
   } finally {
@@ -440,6 +450,24 @@ async function trackHands() {
     const data = await response.json();
     if (run !== generation || !stream || paused) return;
     targetHands = (data.hands || []).sort((a, b) => a[0][0] - b[0][0]);
+    if (recognitionMode === 'words' && latestPose && Date.now() - latestPoseAt < 250) {
+      const emptyHand = () => Array.from({length: 21}, () => [0, 0]);
+      const mapped = points => letterboxLandmarks(points, camera.videoWidth, camera.videoHeight);
+      const points = [...(latestPose.some(([x, y]) => x !== 0 || y !== 0)
+        ? mapped(latestPose) : latestPose),
+        ...(data.model_hands?.left ? mapped(data.model_hands.left) : emptyHand()),
+        ...(data.model_hands?.right ? mapped(data.model_hands.right) : emptyHand())];
+      if (points.length === 75) {
+        samples.push(points);
+        if (samples.length > 18) samples.shift();
+        const now = Date.now();
+        if (samples.length === 18 && !analyzing && !finishHolding &&
+            now - lastWordAnalysisAt >= 280) {
+          lastWordAnalysisAt = now;
+          recognizeLive([...samples]);
+        }
+      }
+    }
     const hasMessage = Boolean(messageText());
     const wasFinishing = finishHolding;
     finishHolding = Boolean(data.finish_gesture && hasMessage);
@@ -470,6 +498,37 @@ async function trackHands() {
     if (run === generation) {
       tracking = false;
       trackingController = null;
+    }
+  }
+}
+
+async function trackPose() {
+  if (!stream || paused || poseTracking || recognitionMode !== 'words' || camera.readyState < 2) return;
+  poseTracking = true;
+  const run = generation;
+  poseContext.drawImage(camera, 0, 0, poseCanvas.width, poseCanvas.height);
+  const blob = await new Promise(resolve => poseCanvas.toBlob(resolve, 'image/jpeg', 0.65));
+  if (!blob || run !== generation || !stream || paused) {
+    poseTracking = false;
+    return;
+  }
+  const form = new FormData();
+  form.append('frame', blob, 'pose.jpg');
+  poseController = new AbortController();
+  try {
+    const response = await fetch('/api/pose-track', {method: 'POST', body: form,
+      signal: poseController.signal});
+    if (!response.ok) return;
+    const data = await response.json();
+    if (run !== generation || !stream || paused) return;
+    latestPose = data.pose || Array.from({length: 33}, () => [0, 0]);
+    latestPoseAt = Date.now();
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) latestPose = null;
+  } finally {
+    if (run === generation) {
+      poseTracking = false;
+      poseController = null;
     }
   }
 }
@@ -542,11 +601,11 @@ async function recognizeEmotion() {
 async function recognizeLive(clip) {
   analyzing = true;
   const run = generation;
-  const form = new FormData();
-  clip.forEach((blob, index) => form.append('frames', blob, `frame-${index}.jpg`));
   controller = new AbortController();
   try {
-    const response = await fetch('/api/live', {method: 'POST', body: form, signal: controller.signal});
+    const response = await fetch('/api/live-landmarks', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({frames: clip}),
+      signal: controller.signal});
     const data = await response.json();
     if (run !== generation) return;
     if (!response.ok) throw new Error(data.error || 'Recognition failed');

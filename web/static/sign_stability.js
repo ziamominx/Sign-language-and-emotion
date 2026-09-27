@@ -4,7 +4,6 @@ class SignStability {
     this.candidate = '';
     this.count = 0;
     this.lastAccepted = '';
-    this.lastAcceptedAt = 0;
   }
 
   resetCandidate() {
@@ -17,9 +16,8 @@ class SignStability {
     this.lastAccepted = '';
   }
 
-  markAccepted(label, now = Date.now()) {
+  markAccepted(label) {
     this.lastAccepted = label;
-    this.lastAcceptedAt = now;
     this.resetCandidate();
   }
 
@@ -46,7 +44,7 @@ class SignStability {
       this.count = 1;
     }
     const needed = strong ? 2 : 3;
-    if (this.count < needed || first.label === this.lastAccepted || now - this.lastAcceptedAt < 1800) return null;
+    if (this.count < needed || first.label === this.lastAccepted) return null;
     return first.label;
   }
 }

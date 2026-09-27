@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {containedVideoRect, easeHands} = require('./web/static/hand_geometry');
+const {containedVideoRect, easeHands, letterboxLandmarks} = require('./web/static/hand_geometry');
 
 test('overlay matches a 4:3 video in a wide camera panel', () => {
   const rect = containedVideoRect(1000, 500, 640, 480);
@@ -19,4 +19,11 @@ test('overlay matches pillarboxed and landscape video exactly', () => {
 test('landmarks ease toward a stable target without a one-frame jump', () => {
   assert.deepEqual(easeHands([[[0, 0]]], [[[1, 1]]], 0.5), [[[0.5, 0.5]]]);
   assert.deepEqual(easeHands([], [[[1, 1]]], 0.5), [[[1, 1]]]);
+});
+
+test('recognition landmarks match the original letterboxed 640 by 480 camera frames', () => {
+  assert.deepEqual(letterboxLandmarks([[0, 0], [0.5, 0.5], [1, 1]], 1280, 720),
+    [[0, 0.125], [0.5, 0.5], [1, 0.875]]);
+  assert.deepEqual(letterboxLandmarks([[0, 0], [1, 1]], 640, 480),
+    [[0, 0], [1, 1]]);
 });

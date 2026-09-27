@@ -53,6 +53,18 @@ class HandTrackingTests(unittest.TestCase):
                                             content_type='multipart/form-data')
             self.assertFalse(response.get_json()['finish_gesture'])
 
+    def test_tracking_reuses_hands_in_raw_coordinates_for_word_model(self):
+        tracker = SimpleNamespace(process=lambda _: SimpleNamespace(
+            multi_hand_landmarks=[hand()],
+            multi_handedness=[SimpleNamespace(classification=[SimpleNamespace(label='Left')])]))
+        with patch('server.get_tracker', return_value=tracker):
+            response = self.client.post('/api/track', data=frame(),
+                                        content_type='multipart/form-data')
+        data = response.get_json()
+        self.assertAlmostEqual(data['hands'][0][0][0], 0.5)
+        self.assertEqual(data['model_hands']['left'][0], [0.5, 0.7])
+        self.assertIsNone(data['model_hands']['right'])
+
     def test_bad_frames_are_rejected(self):
         self.assertEqual(self.client.post('/api/track', data={},
                          content_type='multipart/form-data').status_code, 400)

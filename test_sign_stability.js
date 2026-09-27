@@ -44,5 +44,5 @@ test('moderate guesses require three matching windows and different words can fo
   assert.equal(policy.observe(moderate, 3400), 'A');
   policy.markAccepted('A', 3400);
   assert.equal(policy.observe(result('B'), 4100), null);
-  assert.equal(policy.observe(result('B'), 5400), 'B');
+  assert.equal(policy.observe(result('B'), 4400), 'B');
 });

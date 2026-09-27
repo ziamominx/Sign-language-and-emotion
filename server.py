@@ -28,6 +28,8 @@ tracker = None
 tracker_lock = RLock()
 face_tracker = None
 face_tracker_lock = RLock()
+pose_tracker = None
+pose_tracker_lock = RLock()
 
 
 def get_tracker():
@@ -52,6 +54,17 @@ def get_face_tracker():
                     refine_landmarks=False, min_detection_confidence=0.35,
                     min_tracking_confidence=0.45)
     return face_tracker
+
+
+def get_pose_tracker():
+    global pose_tracker
+    if pose_tracker is None:
+        with pose_tracker_lock:
+            if pose_tracker is None:
+                pose_tracker = mp.solutions.pose.Pose(
+                    static_image_mode=False, model_complexity=0,
+                    min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    return pose_tracker
 
 
 def _open_palm(landmarks):
@@ -229,15 +242,48 @@ def track_hands():
             # Match the original desktop preview: detect on the mirrored frame.
             result = get_tracker().process(cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB))
         landmarks = result.multi_hand_landmarks or []
+        model_hands = {"left": None, "right": None}
+        for hand, handedness in zip(landmarks, getattr(result, "multi_handedness", None) or []):
+            if handedness.classification:
+                side = handedness.classification[0].label.lower()
+                if side in model_hands:
+                    # Overlay tracking uses a mirrored image. Restore the raw
+                    # camera coordinates expected by the word model.
+                    model_hands[side] = [[round(1 - point.x, 4), round(point.y, 4)]
+                                         for point in hand.landmark]
         return jsonify({
             "hands": [[[round(point.x, 4), round(point.y, 4)] for point in hand.landmark]
                       for hand in landmarks],
+            "model_hands": model_hands,
             "finish_gesture": len(landmarks) == 2 and all(
                 _open_palm(hand.landmark) for hand in landmarks),
         })
     except Exception:
         app.logger.exception("Hand tracking failed")
         return jsonify({"error": "Hand tracking failed"}), 500
+
+
+@app.post("/api/pose-track")
+def track_pose():
+    """Supply body landmarks for fast word inference without clip reprocessing."""
+    upload = request.files.get("frame")
+    if upload is None:
+        return jsonify({"error": "Send one JPEG camera frame in the frame field"}), 400
+    data = upload.read()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "The camera frame must be a JPEG image"}), 422
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or min(image.shape[:2]) < 120:
+        return jsonify({"error": "The camera frame could not be read"}), 422
+    try:
+        with pose_tracker_lock:
+            result = get_pose_tracker().process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        pose = result.pose_landmarks.landmark if result.pose_landmarks else None
+        return jsonify({"pose": [[round(point.x, 4), round(point.y, 4)] for point in pose]
+                        if pose else None})
+    except Exception:
+        app.logger.exception("Body tracking failed")
+        return jsonify({"error": "Body tracking failed"}), 500
 
 
 @app.post("/api/face-track")
@@ -403,6 +449,42 @@ def live():
                     "frames": len(points),
                     "visibility": visibility,
                     "guidance": _visibility_guidance(visibility["hands"], visibility["pose"]),
+                    "processing_ms": round((perf_counter() - started) * 1000)})
+
+
+@app.post("/api/live-landmarks")
+def live_landmarks():
+    """Classify a rolling clip built from already-tracked camera landmarks."""
+    started = perf_counter()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or "frames" not in payload:
+        return jsonify({"error": "Send landmark frames as JSON"}), 400
+    try:
+        points = np.asarray(payload["frames"], dtype=np.float32)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Expected numeric landmark frames"}), 422
+    if (points.ndim != 3 or not 12 <= len(points) <= 32 or
+            points.shape[1:] != (75, 2) or not np.isfinite(points).all()):
+        return jsonify({"error": "Expected 12–32 finite frames of 75 x/y landmarks"}), 422
+    pose_ratio = float(np.count_nonzero(np.any(points[:, 11:17] != 0, axis=(1, 2)))) / len(points)
+    hand_ratio = float(np.count_nonzero(np.any(points[:, 33:] != 0, axis=(1, 2)))) / len(points)
+    visibility = {"hands": round(hand_ratio, 2), "pose": round(pose_ratio, 2),
+                  "fallback_frames": 0}
+    guidance = _visibility_guidance(hand_ratio, pose_ratio)
+    if min(hand_ratio, pose_ratio) < 0.4:
+        return jsonify({"visible": False, "suggestions": [], "uncertain": True,
+                        "visibility": visibility, "guidance": guidance,
+                        "processing_ms": round((perf_counter() - started) * 1000)})
+    try:
+        predictions = get_recognizer().predict(points)
+    except Exception:
+        app.logger.exception("Landmark recognition failed")
+        return jsonify({"error": "Recognition failed; please try again"}), 500
+    uncertain = predictions[0]["score"] < 0.45 or (
+        predictions[0]["score"] - predictions[1]["score"] < 0.10)
+    return jsonify({"visible": True, "suggestions": predictions,
+                    "uncertain": uncertain, "frames": len(points),
+                    "visibility": visibility, "guidance": guidance,
                     "processing_ms": round((perf_counter() - started) * 1000)})
 
 
