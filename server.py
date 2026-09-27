@@ -11,6 +11,7 @@ import numpy as np
 from flask import Flask, jsonify, render_template, request
 
 from asl_model import ASLRecognizer
+from alphabet_model import ASLAlphabetRecognizer
 
 
 ROOT = Path(__file__).resolve().parent
@@ -19,6 +20,8 @@ app = Flask(__name__, template_folder=str(ROOT / "web" / "templates"),
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 recognizer = None
 recognizer_lock = Lock()
+alphabet_recognizer = None
+alphabet_recognizer_lock = Lock()
 
 
 def get_recognizer():
@@ -28,6 +31,15 @@ def get_recognizer():
             if recognizer is None:
                 recognizer = ASLRecognizer()
     return recognizer
+
+
+def get_alphabet_recognizer():
+    global alphabet_recognizer
+    if alphabet_recognizer is None:
+        with alphabet_recognizer_lock:
+            if alphabet_recognizer is None:
+                alphabet_recognizer = ASLAlphabetRecognizer()
+    return alphabet_recognizer
 
 
 def _hands_by_side(result):
@@ -126,6 +138,64 @@ def status():
     except Exception as exc:
         app.logger.exception("Model unavailable")
         return jsonify({"ready": False, "error": str(exc)}), 503
+
+
+@app.get("/api/alphabet/status")
+def alphabet_status():
+    """The optional local checkpoint may be absent without breaking word mode."""
+    try:
+        model = get_alphabet_recognizer()
+        return jsonify({"ready": True, "labels": len(model.labels), "experimental": True})
+    except FileNotFoundError as exc:
+        return jsonify({"ready": False, "experimental": True, "error": str(exc)})
+    except Exception:
+        app.logger.exception("Alphabet model unavailable")
+        return jsonify({"ready": False, "experimental": True,
+                        "error": "Alphabet model could not be loaded"}), 503
+
+
+@app.post("/api/alphabet/predict")
+def alphabet_predict():
+    """Recognize one visible hand as an experimental fingerspelling symbol."""
+    upload = request.files.get("frame")
+    if upload is None:
+        return jsonify({"error": "Send one JPEG camera frame in the frame field"}), 400
+    data = upload.read()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "The camera frame must be a JPEG image"}), 422
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or min(image.shape[:2]) < 120:
+        return jsonify({"error": "The camera frame could not be read"}), 422
+    try:
+        model = get_alphabet_recognizer()
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except Exception:
+        app.logger.exception("Alphabet model unavailable")
+        return jsonify({"error": "Alphabet model could not be loaded"}), 503
+
+    started = perf_counter()
+    try:
+        # Each request is independent, so a static-image detector must locate
+        # the hand afresh. Preserve the raw x/y/z coordinates used in training.
+        with mp.solutions.hands.Hands(
+                static_image_mode=True, max_num_hands=1, model_complexity=0,
+                min_detection_confidence=0.6) as hands:
+            result = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if not result.multi_hand_landmarks:
+            return jsonify({"visible": False, "suggestions": [], "uncertain": True,
+                            "guidance": "Show one hand clearly near the center of the camera.",
+                            "processing_ms": round((perf_counter() - started) * 1000)})
+        predictions = model.predict(result.multi_hand_landmarks[0].landmark)
+    except Exception:
+        app.logger.exception("Alphabet recognition failed")
+        return jsonify({"error": "Alphabet recognition failed; please try again"}), 500
+
+    uncertain = predictions[0]["score"] < 0.65 or (
+        predictions[0]["score"] - predictions[1]["score"] < 0.15)
+    return jsonify({"visible": True, "suggestions": predictions, "uncertain": uncertain,
+                    "guidance": "Hold one letter clearly; review the suggestion before adding it.",
+                    "processing_ms": round((perf_counter() - started) * 1000)})
 
 
 @app.post("/api/recognize")

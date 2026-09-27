@@ -5,6 +5,9 @@ const startButton = $('#camera-button');
 const pauseButton = $('#capture-button');
 const status = $('#status-message');
 const words = [];
+let spelled = '';
+let recognitionMode = 'words';
+let alphabetReady = false;
 const canvas = document.createElement('canvas');
 canvas.width = 640;
 canvas.height = 480;
@@ -12,6 +15,7 @@ const context = canvas.getContext('2d', {alpha: false});
 let stream = null, modelReady = false, paused = false, timer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
 const stability = new SignStability();
+const letterStability = new LetterStability();
 
 function announce(text, error = false) {
   status.textContent = text;
@@ -20,7 +24,7 @@ function announce(text, error = false) {
 
 function renderWords() {
   $('#message').replaceChildren();
-  if (!words.length) {
+  if (!words.length && !spelled) {
     const empty = document.createElement('span');
     empty.className = 'message-empty';
     empty.textContent = 'Recognized signs will appear here automatically.';
@@ -32,7 +36,18 @@ function renderWords() {
     chip.textContent = word;
     $('#message').append(chip);
   }
-  for (const button of ['#speak-button', '#undo-button', '#clear-button']) $(button).disabled = !words.length;
+  if (spelled) {
+    const chip = document.createElement('span');
+    chip.className = 'word-chip spelling';
+    chip.textContent = spelled;
+    chip.setAttribute('aria-label', `Spelling ${spelled}`);
+    $('#message').append(chip);
+  }
+  for (const button of ['#speak-button', '#undo-button', '#clear-button']) $(button).disabled = !words.length && !spelled;
+}
+
+function messageText() {
+  return [...words, ...(spelled ? [spelled] : [])].join(' ');
 }
 
 function speak(text, replace = false) {
@@ -53,6 +68,23 @@ function addWord(label, automatic = false) {
   announce(`${automatic ? 'Recognized' : 'Added'} “${label}”. Keep signing to continue.`);
 }
 
+function addLetter(label, automatic = false) {
+  if (label === 'del') {
+    spelled = spelled.slice(0, -1);
+  } else if (label === 'space') {
+    if (spelled) {
+      words.push(spelled);
+      if ($('#auto-speak').checked) speak(spelled);
+      spelled = '';
+    }
+  } else {
+    spelled += label;
+  }
+  letterStability.markAccepted(label);
+  renderWords();
+  announce(automatic ? `Added letter ${label}. Lower your hand before repeating it.` : `Updated spelling: ${spelled || 'empty'}.`);
+}
+
 function renderSuggestions(items = []) {
   $('#suggestions').replaceChildren();
   if (!items.length) {
@@ -71,7 +103,7 @@ function renderSuggestions(items = []) {
     const score = document.createElement('small');
     score.textContent = `${Math.round(item.score * 100)}% model score  + ADD`;
     button.append(label, score);
-    button.addEventListener('click', () => addWord(item.label));
+    button.addEventListener('click', () => recognitionMode === 'words' ? addWord(item.label) : addLetter(item.label));
     $('#suggestions').append(button);
   }
 }
@@ -79,6 +111,7 @@ function renderSuggestions(items = []) {
 function clearRecognition() {
   samples = [];
   stability.resetCandidate();
+  letterStability.resetCandidate();
   controller?.abort();
   controller = null;
   generation++;
@@ -93,6 +126,42 @@ function updateControls() {
   $('#camera-state').textContent = !stream ? 'Camera off' : paused ? 'Paused' : 'Translating live';
   frame.classList.toggle('active', !!stream);
   frame.classList.toggle('paused', paused);
+}
+
+function setMode(next) {
+  if (next === recognitionMode || (next === 'letters' && !alphabetReady)) return;
+  clearRecognition();
+  recognitionMode = next;
+  stability.rearm();
+  letterStability.rearm();
+  for (const [mode, selector] of [['words', '#mode-words'], ['letters', '#mode-letters']]) {
+    const button = $(selector);
+    button.classList.toggle('selected', mode === next);
+    button.setAttribute('aria-pressed', String(mode === next));
+  }
+  $('#letter-controls').hidden = next !== 'letters';
+  $('#framing-hint').textContent = next === 'letters'
+    ? 'Show one hand clearly in the center of the camera. Hold each letter, then lower your hand before the next.'
+    : 'Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.';
+  $('#mode-hint').textContent = next === 'letters'
+    ? 'Experimental fingerspelling: hold one letter until it appears, then lower your hand before the next. J and Z need motion and are not added automatically.'
+    : 'ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat the same word.';
+  $('#live-guess').textContent = stream ? 'Watching for a sign' : 'Camera off';
+  $('#live-detail').textContent = next === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
+  renderSuggestions();
+  announce(next === 'letters' ? 'Fingerspelling mode is ready. Show one hand to the camera.' : 'ASL word mode is ready.');
+}
+
+async function checkAlphabet() {
+  try {
+    const response = await fetch('/api/alphabet/status');
+    const data = await response.json();
+    alphabetReady = response.ok && data.ready;
+    $('#mode-letters').disabled = !alphabetReady;
+    $('#mode-letters').title = alphabetReady ? 'Use the local alphabet model' : (data.error || 'Local alphabet model unavailable');
+  } catch {
+    $('#mode-letters').title = 'Local alphabet model unavailable';
+  }
 }
 
 async function checkModel() {
@@ -128,9 +197,11 @@ async function startCamera() {
     $('#camera-placeholder').hidden = true;
     paused = false;
     updateControls();
-    $('#live-guess').textContent = 'Watching for a sign';
-    $('#live-detail').textContent = 'Sign one word at a time';
-    announce('Live translation started. Sign in the camera area.');
+    $('#live-guess').textContent = recognitionMode === 'letters' ? 'Watching for a hand' : 'Watching for a sign';
+    $('#live-detail').textContent = recognitionMode === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
+    announce(recognitionMode === 'letters'
+      ? 'Live fingerspelling started. Show one hand in the camera area.'
+      : 'Live translation started. Sign in the camera area.');
     timer = setInterval(sampleFrame, 110);
   } catch (error) {
     stream?.getTracks().forEach(track => track.stop());
@@ -146,6 +217,7 @@ function stopCamera() {
   timer = null;
   clearRecognition();
   stability.rearm();
+  letterStability.rearm();
   stream?.getTracks().forEach(track => track.stop());
   stream = null;
   camera.srcObject = null;
@@ -171,7 +243,10 @@ async function sampleFrame() {
     if (!blob || !stream || paused) return;
     samples.push(blob);
     if (samples.length > 16) samples.shift();
-    if (samples.length === 16 && !analyzing) recognizeLive([...samples]);
+    if (!analyzing) {
+      if (recognitionMode === 'letters') recognizeLetter(blob);
+      else if (samples.length === 16) recognizeLive([...samples]);
+    }
   } catch (error) {
     announce(`Could not read camera: ${error.message}`, true);
   } finally {
@@ -222,25 +297,79 @@ async function recognizeLive(clip) {
   }
 }
 
+async function recognizeLetter(blob) {
+  analyzing = true;
+  const run = generation;
+  const form = new FormData();
+  form.append('frame', blob, 'hand.jpg');
+  controller = new AbortController();
+  try {
+    const response = await fetch('/api/alphabet/predict', {method: 'POST', body: form, signal: controller.signal});
+    const data = await response.json();
+    if (run !== generation) return;
+    if (!response.ok) throw new Error(data.error || 'Fingerspelling recognition failed');
+    const accepted = letterStability.observe(data);
+    if (!data.visible) {
+      $('#live-guess').textContent = 'Waiting for a hand';
+      $('#live-detail').textContent = data.guidance || 'Show one hand to spell';
+      renderSuggestions();
+      announce(data.guidance || 'Show one hand to spell a letter.');
+      return;
+    }
+    const first = data.suggestions[0];
+    $('#live-guess').textContent = first.label;
+    $('#live-detail').textContent = `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
+    renderSuggestions(data.suggestions);
+    if (accepted) addLetter(accepted, true);
+    else announce(data.uncertain
+      ? 'Unsure of this letter. Hold your hand clearly or choose a candidate.'
+      : 'Checking the letter across several frames…');
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) announce(error.message, true);
+  } finally {
+    if (run === generation) {
+      analyzing = false;
+      controller = null;
+    }
+  }
+}
+
 startButton.addEventListener('click', () => stream ? stopCamera() : startCamera());
+$('#mode-words').addEventListener('click', () => setMode('words'));
+$('#mode-letters').addEventListener('click', () => setMode('letters'));
 pauseButton.addEventListener('click', () => {
   if (!stream) return;
   paused = !paused;
   clearRecognition();
   updateControls();
-  $('#live-guess').textContent = paused ? 'Translation paused' : 'Watching for a sign';
-  $('#live-detail').textContent = paused ? 'Resume when you are ready' : 'Sign one word at a time';
+  $('#live-guess').textContent = paused ? 'Translation paused'
+    : recognitionMode === 'letters' ? 'Watching for a hand' : 'Watching for a sign';
+  $('#live-detail').textContent = paused ? 'Resume when you are ready'
+    : recognitionMode === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
   announce(paused ? 'Live translation paused.' : 'Live translation resumed.');
 });
 $('#speak-button').addEventListener('click', () => {
-  if (!words.length) return;
-  announce(speak(words.join(' '), true) ? 'Speaking your message.' : 'This browser does not support speech output.');
+  if (!messageText()) return;
+  announce(speak(messageText(), true) ? 'Speaking your message.' : 'This browser does not support speech output.');
 });
-$('#undo-button').addEventListener('click', () => { words.pop(); renderWords(); announce('Removed the last word.'); });
-$('#clear-button').addEventListener('click', () => { words.length = 0; renderWords(); announce('Message cleared.'); });
+$('#letter-space').addEventListener('click', () => addLetter('space'));
+$('#letter-delete').addEventListener('click', () => addLetter('del'));
+$('#undo-button').addEventListener('click', () => {
+  if (spelled) spelled = spelled.slice(0, -1);
+  else words.pop();
+  renderWords();
+  announce('Removed the last character or word.');
+});
+$('#clear-button').addEventListener('click', () => {
+  words.length = 0;
+  spelled = '';
+  renderWords();
+  announce('Message cleared.');
+});
 window.addEventListener('beforeunload', stopCamera);
 
 renderWords();
 renderSuggestions();
 updateControls();
 checkModel();
+checkAlphabet();

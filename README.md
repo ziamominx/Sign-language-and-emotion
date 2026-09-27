@@ -17,6 +17,12 @@ Click **Start live translation**, allow camera access, and frame your upper body
 
 The site checks consecutive predictions before automatically adding a word. If hands or the upper body are lost, it shows specific framing guidance. An independent hand detector can recover hands missed by the main body tracker; this adds roughly 0.35 seconds to a 16-frame clip when needed on the tested machine.
 
+### Optional fingerspelling
+
+The **Fingerspell · experimental** mode uses a separate 28-label ASL alphabet checkpoint from the user's local reference project. It does not require training. On this computer the checkpoint is already cached at `.models/asl_mediapipe_mlp_model.h5`. On another computer, place an existing `asl_mediapipe_mlp_model.h5` there or set the `ASL_ALPHABET_MODEL_PATH` environment variable to its location, then restart the server. If the file is absent, the website keeps the mode disabled while ASL words remains available. The checkpoint is deliberately excluded from Git. The reference model was trained on images from the [Kaggle ASL Alphabet dataset](https://www.kaggle.com/grassknoted/asl-alphabet/data), which lists a GPL 2 license; this repository does not redistribute those images or its checkpoint.
+
+Select **Fingerspell · experimental**, show one hand, and hold each letter until it appears in the message. Lower the hand briefly before repeating a letter. Use **Finish spelled word** to separate and speak the completed word, or **Delete letter** to correct it. The J and Z signs involve motion and are not added automatically. Letter suggestions are experimental: the supplied reference model was trained on static images and has no reliable idle/no-hand class. The website requires a visible hand and repeated high-scoring predictions before adding a letter. Review every spelled word.
+
 ## Scope and accuracy
 
 This is a research prototype, not a complete or certified ASL interpreter. The [SignBart project](https://github.com/TinhNguyen2312/SignBart) reports **68% accuracy on its WLASL-2000 evaluation split**; that result is not a guarantee for a live webcam or an individual signer. The model only classifies short isolated clips among its 2,000 labels. It cannot understand continuous ASL, facial grammar, signs outside the vocabulary, or translate full ASL sentences into English. The displayed percentages are model scores, not verified probabilities of correctness. Automatic additions may be wrong, so review the message before important communication. Initial analysis needs roughly 1.8 seconds of camera frames plus local processing; this is continuous, but not zero-latency translation.
@@ -25,4 +31,4 @@ The [National Institute on Deafness and Other Communication Disorders](https://w
 
 ## Development checks
 
-Run `py -3.10 -m unittest -v test_sign_recognition.py test_asl_model.py` for the recognizer and model adapter checks. For a live check, open the site, grant camera access, sign a known isolated word, and review the live guess and message. Camera and speech access depend on the browser and target device.
+Run `py -3.10 -m unittest -v test_sign_recognition.py test_asl_model.py test_alphabet_model.py test_alphabet_api.py` and `node --test test_sign_stability.js test_letter_stability.js` for the recognizer, model adapters, and temporal gates. For a live check, open the site, grant camera access, sign a known isolated word, then select fingerspelling and show a known letter. Camera and speech access depend on the browser and target device.
