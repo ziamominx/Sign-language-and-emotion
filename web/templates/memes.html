@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meme Challenge — Arena</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='arena/arena.css') }}">
+</head>
+<body>
+  <div id="nav"></div>
+  <div class="arena-wrap">
+    <section class="card">
+      <h2>😂 MEME CHALLENGE</h2>
+      <p class="sub">Act it. AI reads it. Meme appears. The AI interprets the <i>observable</i> expression — it never claims to know what you actually feel.</p>
+      <div class="hud" id="hud"></div>
+      <div class="grid cols-2">
+        <div>
+          <div class="camera-shell" id="shell">
+            <video id="camera" autoplay muted playsinline></video>
+            <canvas id="overlay" class="overlay-canvas"></canvas>
+            <div class="center-label" id="challenge-label" hidden>—</div>
+            <div class="warn-banner" hidden></div>
+            <div class="placeholder" id="placeholder">Camera preview appears here.<br>Start the challenge, then perform!</div>
+          </div>
+          <div style="display:flex;gap:.6rem;margin-top:.8rem;flex-wrap:wrap">
+            <button class="btn primary" id="start">Start challenge</button>
+            <button class="btn" id="capture" disabled>Capture my act</button>
+            <button class="btn" id="next">Next challenge →</button>
+          </div>
+        </div>
+        <div>
+          <div class="card" style="background:linear-gradient(160deg,#1a1230,#141c2a);border-color:#3d2a6b">
+            <p class="small" style="margin:0;color:var(--accent2);letter-spacing:.2em">YOUR CHALLENGE</p>
+            <h3 id="challenge-prompt" style="font-size:1.35rem;margin:.35rem 0">Loading…</h3>
+            <p class="small muted" id="challenge-hint"></p>
+          </div>
+          <div class="card" style="margin-top:1rem">
+            <h2>Live interpretation</h2>
+            <p class="sub">What the camera can actually see.</p>
+            <p class="small muted" style="margin:.1rem 0 .3rem">DETECTED FEATURES</p>
+            <div class="tag-chips" id="features"><span class="chip">—</span></div>
+            <p class="small muted" style="margin:.5rem 0 .3rem">INTERPRETATION</p>
+            <div class="readout">
+              <div class="row"><span>Expression</span><b id="expression">—</b></div>
+              <div class="row"><span>Action</span><b id="action">—</b></div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:1rem" id="result-panel" hidden>
+            <h2>AI SCORE</h2>
+            <div id="score-breakdown"></div>
+            <div class="bar-row"><span class="name">FINAL</span><span class="pct" id="final-pct">0</span>
+              <div class="meter"><i id="final-bar" style="width:0%"></i></div></div>
+            <h3 style="margin:.8rem 0 .3rem">Matching meme</h3>
+            <div class="meme-card" id="meme-card"></div>
+            <div style="display:flex;gap:.6rem;margin-top:.8rem">
+              <button class="btn" id="try-again">Try again</button>
+              <button class="btn primary" id="next-after">Next challenge →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="/static/arena/arena.js"></script>
+  <script src="/static/arena/memes.js"></script>
+</body>
+</html>

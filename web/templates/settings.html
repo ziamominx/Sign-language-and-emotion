@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings — Arena</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='arena/arena.css') }}">
+</head>
+<body>
+  <div id="nav"></div>
+  <div class="arena-wrap">
+    <section class="card">
+      <h2>Settings</h2>
+      <p class="sub">Stored locally in your browser. Everything applies immediately.</p>
+
+      <h3>Camera</h3>
+      <div class="setting">
+        <label>Mirror camera<small>Selfie view for the preview and overlays</small></label>
+        <span class="switch"><input type="checkbox" id="mirror" checked><span></span></span>
+      </div>
+
+      <h3>AI</h3>
+      <div class="setting">
+        <label>Confidence threshold<small>Detections below this are ignored</small></label>
+        <input type="range" id="confidence" min="0.3" max="0.95" step="0.05" value="0.6">
+      </div>
+      <div class="setting">
+        <label>Gesture sensitivity<small>How much motion counts as a gesture</small></label>
+        <select id="sensitivity">
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+
+      <h3>Voice</h3>
+      <div class="setting">
+        <label>Speed<small id="rate-out">0.9×</small></label>
+        <input type="range" id="rate" min="0.5" max="1.5" step="0.05" value="0.9">
+      </div>
+      <div class="setting">
+        <label>Volume</label>
+        <input type="range" id="volume" min="0" max="1" step="0.05" value="1">
+      </div>
+
+      <h3>Game</h3>
+      <div class="setting">
+        <label>Round seconds<small>Charades timer per round</small></label>
+        <input type="number" id="roundSeconds" min="20" max="180" step="10" value="60">
+      </div>
+
+      <h3>Appearance</h3>
+      <div class="setting">
+        <label>Reduced animations<small>Minimize transitions and pulses</small></label>
+        <span class="switch"><input type="checkbox" id="reducedMotion"><span></span></span>
+      </div>
+
+      <p class="small muted" style="margin-top:1rem">
+        Privacy: all processing runs locally. Camera frames never leave this machine and nothing is recorded.
+      </p>
+    </section>
+  </div>
+  <script src="/static/arena/arena.js"></script>
+  <script>
+    document.querySelector('#nav').innerHTML = arenaNav('/settings');
+    const settings = ArenaSettings.load();
+
+    function bind(id, key, transform, output) {
+      const element = document.querySelector('#' + id);
+      if (element.type === 'checkbox') element.checked = settings[key];
+      else element.value = settings[key];
+      element.addEventListener('input', () => {
+        settings[key] = element.type === 'checkbox' ? element.checked
+          : (transform ? transform(element.value) : element.value);
+        if (output) output(element.value);
+        ArenaSettings.save(settings);
+      });
+      if (output) output(element.value);
+    }
+
+    const rateOut = value => document.querySelector('#rate-out').textContent = `${parseFloat(value).toFixed(2)}×`;
+    bind('mirror', 'mirror');
+    bind('confidence', 'confidence', parseFloat);
+    bind('sensitivity', 'sensitivity');
+    bind('rate', 'rate', parseFloat, rateOut);
+    bind('volume', 'volume', parseFloat);
+    bind('roundSeconds', 'roundSeconds', parseInt);
+    bind('reducedMotion', 'reducedMotion');
+
+    function applyReducedMotion() {
+      document.documentElement.style.setProperty('scroll-behavior',
+        settings.reducedMotion ? 'auto' : 'smooth');
+    }
+    document.querySelector('#reducedMotion').addEventListener('change', applyReducedMotion);
+    applyReducedMotion();
+  </script>
+</body>
+</html>

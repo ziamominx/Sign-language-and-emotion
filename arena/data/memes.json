@@ -1,0 +1,30 @@
+{
+  "memes": [
+    {"id": "shock_pikachu", "tags": ["surprise", "shock", "eyes_wide", "mouth_open"], "intensity": 0.9, "label": "Surprised Pikachu", "image": "/static/arena/memes/shock.svg"},
+    {"id": "shock_face", "tags": ["surprise", "shock", "eyes_wide", "mouth_open", "hands_on_head"], "intensity": 0.8, "label": "Shocked Face", "image": "/static/arena/memes/shock.svg"},
+    {"id": "mind_blown", "tags": ["surprise", "excitement", "celebration", "hands_raised", "victory"], "intensity": 1.0, "label": "Mind Blown", "image": "/static/arena/memes/mind_blown.svg"},
+    {"id": "think_hmm", "tags": ["confusion", "thinking", "eyebrow_raised", "neutral"], "intensity": 0.4, "label": "Thinking Hmm", "image": "/static/arena/memes/thinking.svg"},
+    {"id": "confused_math", "tags": ["confusion", "confused", "eyebrow_raised", "head_tilt"], "intensity": 0.6, "label": "Confused Math Lady", "image": "/static/arena/memes/confused.svg"},
+    {"id": "party_hard", "tags": ["celebration", "victory", "excitement", "hands_raised"], "intensity": 1.0, "label": "Party Hard", "image": "/static/arena/memes/party.svg"},
+    {"id": "facepalm", "tags": ["facepalm", "disappointment", "hand_on_face"], "intensity": 0.7, "label": "Epic Facepalm", "image": "/static/arena/memes/facepalm.svg"},
+    {"id": "disaster_girl", "tags": ["awkward", "disappointment", "smile"], "intensity": 0.5, "label": "Disaster Girl", "image": "/static/arena/memes/awkward.svg"},
+    {"id": "angry_eyes", "tags": ["anger", "angry", "eyebrows_down"], "intensity": 0.9, "label": "Angry Eyes", "image": "/static/arena/memes/angry.svg"},
+    {"id": "rage_quit", "tags": ["anger", "angry", "fear", "eyebrows_down", "hands_raised"], "intensity": 1.0, "label": "Rage Quit", "image": "/static/arena/memes/angry.svg"},
+    {"id": "sad_panda", "tags": ["sadness", "disappointment", "frown"], "intensity": 0.7, "label": "Sad Panda", "image": "/static/arena/memes/sad.svg"},
+    {"id": "crying_jordan", "tags": ["sadness", "crying", "disappointment", "frown"], "intensity": 0.9, "label": "Crying Jordan", "image": "/static/arena/memes/sad.svg"},
+    {"id": "success_kid", "tags": ["victory", "celebration", "excitement", "smile"], "intensity": 0.8, "label": "Success Kid", "image": "/static/arena/memes/party.svg"},
+    {"id": "awkward_look", "tags": ["awkward", "confusion", "eyes_sideways", "neutral"], "intensity": 0.4, "label": "Awkward Look", "image": "/static/arena/memes/confused.svg"},
+    {"id": "scared_cat", "tags": ["fear", "fear_like", "surprise", "hands_on_head"], "intensity": 0.9, "label": "Scared Cat", "image": "/static/arena/memes/shock.svg"},
+    {"id": "excited_kid", "tags": ["excitement", "celebration", "smile", "jump"], "intensity": 0.9, "label": "Excited Kid", "image": "/static/arena/memes/party.svg"}
+  ],
+  "challenges": [
+    {"id": "failed_exam", "prompt": "ACT LIKE YOU JUST FAILED YOUR EXAM", "expect_tags": ["sadness", "disappointment", "facepalm", "crying"], "hint": "Slump, cover face, frown"},
+    {"id": "extreme_surprise", "prompt": "SHOW EXTREME SURPRISE", "expect_tags": ["surprise", "shock", "eyes_wide", "mouth_open"], "hint": "Wide eyes, open mouth, hands to head"},
+    {"id": "cancelled_trip", "prompt": "ACT LIKE YOUR FRIEND CANCELLED THE TRIP", "expect_tags": ["disappointment", "sadness", "confusion"], "hint": "Shoulders drop, sad face"},
+    {"id": "won_lottery", "prompt": "ACT LIKE YOU JUST WON TEN LAKH", "expect_tags": ["celebration", "victory", "excitement", "hands_raised"], "hint": "Jump, fists up, big smile"},
+    {"id": "saw_crush", "prompt": "ACT LIKE YOU SAW YOUR CRUSH", "expect_tags": ["surprise", "awkward", "smile", "excitement"], "hint": "Freeze, smile, look away"},
+    {"id": "caught_wrong", "prompt": "ACT LIKE YOU GOT CAUGHT DOING SOMETHING WRONG", "expect_tags": ["fear", "shock", "awkward", "surprise"], "hint": "Freeze, wide eyes, hands up"},
+    {"id": "celebration", "prompt": "SHOW A HUGE CELEBRATION", "expect_tags": ["celebration", "victory", "excitement", "hands_raised"], "hint": "Jump, arms up, shout face"},
+    {"id": "confused", "prompt": "ACT COMPLETELY CONFUSED", "expect_tags": ["confusion", "thinking", "head_tilt"], "hint": "Tilt head, raise eyebrow, shrug"}
+  ]
+}

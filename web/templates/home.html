@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Sign &amp; Expression Arena</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='arena/arena.css') }}">
+</head>
+<body>
+  <div id="nav"></div>
+  <div class="arena-wrap">
+    <section class="hero">
+      <p class="tag" style="letter-spacing:.3em;color:var(--accent);font-size:.72rem;font-weight:800;margin:0">SEE IT. UNDERSTAND IT. PLAY IT.</p>
+      <h1>AI SIGN &amp; <span class="grad">EXPRESSION ARENA</span></h1>
+      <p>One perception engine. Three experiences: communicate, play, and react.</p>
+      <div style="margin-top:1.4rem;display:flex;gap:.7rem;justify-content:center;flex-wrap:wrap">
+        <a class="btn primary" href="/communicator">START COMMUNICATOR</a>
+        <a class="btn primary" href="/charades">PLAY CHARADES</a>
+        <a class="btn primary" href="/memes">START MEME CHALLENGE</a>
+        <button class="btn" id="demo-mode">▶ DEMO MODE</button>
+      </div>
+    </section>
+
+    <section class="grid cols-3">
+      <a class="mode-card" href="/communicator">
+        <span class="icon">🗣️</span><span class="tag">Mode 1 · Sign → Text → Voice</span>
+        <h3>AI COMMUNICATOR</h3>
+        <p>Turn gestures into spoken communication. A controlled vocabulary of signs is recognized from live hand tracking, assembled into sentences, and spoken aloud.</p>
+        <span class="go">START COMMUNICATOR →</span>
+      </a>
+      <a class="mode-card" href="/charades">
+        <span class="icon">🎭</span><span class="tag">Mode 2 · Human vs AI</span>
+        <h3>AI DUMB CHARADES</h3>
+        <p>Can you fool the AI? Act out a movie with hands, face, and body. The agent observes concepts, ranks candidates, guesses, and learns from your verdict.</p>
+        <span class="go">PLAY CHARADES →</span>
+      </a>
+      <a class="mode-card" href="/memes">
+        <span class="icon">😂</span><span class="tag">Mode 3 · Expression → Meme</span>
+        <h3>MEME CHALLENGE</h3>
+        <p>Your face. Your actions. AI's reaction. Perform the challenge; the AI reads the observable expression and pose, scores the attempt, and picks the meme.</p>
+        <span class="go">START MEME CHALLENGE →</span>
+      </a>
+    </section>
+
+    <section class="card" style="margin-top:1rem">
+      <h2>System status</h2>
+      <p class="sub">Live values from the local server — measured, not mocked.</p>
+      <div class="stat-row" id="stats">
+        <div class="stat"><b id="stat-movies">…</b><span>Movies</span></div>
+        <div class="stat"><b id="stat-memes">…</b><span>Memes</span></div>
+        <div class="stat"><b id="stat-accuracy">—</b><span>AI guess accuracy</span></div>
+        <div class="stat"><b id="stat-sessions">…</b><span>Sessions</span></div>
+      </div>
+    </section>
+
+    <section class="grid cols-2" style="margin-top:1rem">
+      <div class="card">
+        <h2>Recent sessions</h2>
+        <p class="sub">Latest rounds from all three modes.</p>
+        <div id="recent" class="muted small">Loading…</div>
+      </div>
+      <div class="card">
+        <h2>Demo mode</h2>
+        <p class="sub">A guided 3–5 minute walkthrough of the strongest features.</p>
+        <div class="steps" id="demo-steps">
+          <div class="step" data-href="/communicator"><span class="n">1</span><span>Sign → Text → Voice in the Communicator</span></div>
+          <div class="step" data-href="/charades"><span class="n">2</span><span>Act out a movie — AI observes and guesses</span></div>
+          <div class="step" data-href="/charades"><span class="n">3</span><span>Watch the AI Brain rank candidate movies</span></div>
+          <div class="step" data-href="/charades"><span class="n">4</span><span>Mark the guess right or wrong — the AI adapts</span></div>
+          <div class="step" data-href="/memes"><span class="n">5</span><span>Meme Challenge: perform, get scored, see the meme</span></div>
+          <div class="step" data-href="/history"><span class="n">6</span><span>Final scoreboard and session history</span></div>
+        </div>
+        <div style="margin-top:.9rem;display:flex;gap:.6rem">
+          <button class="btn primary small" id="demo-start">Start walkthrough</button>
+          <button class="btn small" id="demo-stop">Stop</button>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="/static/arena/arena.js"></script>
+  <script src="/static/arena/home.js"></script>
+</body>
+</html>
