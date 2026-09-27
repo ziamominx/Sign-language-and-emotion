@@ -3,7 +3,7 @@
 import io
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
@@ -59,6 +59,20 @@ class HandTrackingTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/track',
                          data={'frame': (io.BytesIO(b'bad'), 'frame.jpg')},
                          content_type='multipart/form-data').status_code, 422)
+
+    def test_tracker_receives_the_same_mirror_orientation_as_the_preview(self):
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+        image[:, :160] = 255
+        _, encoded = cv2.imencode('.jpg', image)
+        tracker = MagicMock()
+        tracker.process.return_value = SimpleNamespace(multi_hand_landmarks=[])
+        with patch('server.get_tracker', return_value=tracker):
+            self.client.post('/api/track',
+                             data={'frame': (io.BytesIO(encoded.tobytes()), 'frame.jpg')},
+                             content_type='multipart/form-data')
+        mirrored = tracker.process.call_args.args[0]
+        self.assertLess(mirrored[20, 20].mean(), 20)
+        self.assertGreater(mirrored[20, 300].mean(), 235)
 
 
 if __name__ == '__main__':

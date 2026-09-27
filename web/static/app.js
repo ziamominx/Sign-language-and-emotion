@@ -14,21 +14,33 @@ canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
 const trackingCanvas = document.createElement('canvas');
 const trackingContext = trackingCanvas.getContext('2d', {alpha: false});
+const faceCanvas = document.createElement('canvas');
+const faceContext = faceCanvas.getContext('2d', {alpha: false});
 const emotionCanvas = document.createElement('canvas');
 const emotionContext = emotionCanvas.getContext('2d', {alpha: false});
 const overlay = $('#hand-overlay');
 const overlayContext = overlay.getContext('2d');
-let stream = null, modelReady = false, paused = false, timer = null;
+let stream = null, modelReady = false, paused = false, timer = null, handTimer = null, faceTimer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
-let tracking = false, trackingController = null, lastTrackedAt = 0, finishHolding = false;
+let tracking = false, trackingController = null, finishHolding = false;
+let faceTracking = false, faceController = null;
 let targetHands = [], displayedHands = [], overlayFrame = null, lastOverlayFrame = 0;
+let targetFace = [], displayedFace = [];
 let emotionReady = false, emotionBusy = false, emotionController = null, lastEmotionAt = 0;
 const stability = new SignStability();
 const letterStability = new LetterStability();
 const finishGesture = new FinishGesture();
 const HAND_BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
-  [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],
-  [13,17],[0,17],[17,18],[18,19],[19,20]];
+  [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+  [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+const FACE_PATHS = [
+  [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10],
+  [33,160,158,133,153,144,33], [362,385,387,263,373,380,362],
+  [70,63,105,66,107], [336,296,334,293,300],
+  [61,40,37,0,267,270,291,321,314,17,84,91,61],
+  [168,6,197,195,5,4,1],
+];
+const FACE_DOTS = [...new Set(FACE_PATHS.flat())];
 
 function fitOverlay() {
   const rect = containedVideoRect(frame.clientWidth, frame.clientHeight,
@@ -46,12 +58,41 @@ function renderHandOverlay(now) {
   if (!stream) return;
   const dt = lastOverlayFrame ? Math.min(100, now - lastOverlayFrame) : 16;
   lastOverlayFrame = now;
-  const fraction = 1 - Math.exp(-dt / 45);
+  const fraction = 1 - Math.exp(-dt / 25);
   displayedHands = easeHands(displayedHands, targetHands, fraction);
+  displayedFace = targetFace.length ? easeHands(
+    displayedFace.length ? [displayedFace] : [], [targetFace], fraction)[0] : [];
   overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-  overlayContext.lineWidth = 2.5;
-  overlayContext.strokeStyle = '#d6ed76';
-  overlayContext.fillStyle = '#f2f9d2';
+  if (displayedFace.length) {
+    overlayContext.strokeStyle = 'rgba(225,240,220,.8)';
+    overlayContext.lineWidth = 1;
+    for (const path of FACE_PATHS) {
+      overlayContext.beginPath();
+      path.forEach((index, position) => {
+        const [x, y] = displayedFace[index];
+        if (position === 0) overlayContext.moveTo(x * overlay.width, y * overlay.height);
+        else overlayContext.lineTo(x * overlay.width, y * overlay.height);
+      });
+      overlayContext.stroke();
+    }
+    overlayContext.fillStyle = 'rgba(240,248,232,.85)';
+    for (const index of FACE_DOTS) {
+      const [x, y] = displayedFace[index];
+      overlayContext.beginPath();
+      overlayContext.arc(x * overlay.width, y * overlay.height, 1.25, 0, Math.PI * 2);
+      overlayContext.fill();
+    }
+    const xs = displayedFace.map(point => point[0]), ys = displayedFace.map(point => point[1]);
+    const x1 = Math.max(0, Math.min(...xs) * overlay.width - 6);
+    const y1 = Math.max(0, Math.min(...ys) * overlay.height - 6);
+    const x2 = Math.min(overlay.width, Math.max(...xs) * overlay.width + 6);
+    const y2 = Math.min(overlay.height, Math.max(...ys) * overlay.height + 6);
+    overlayContext.strokeStyle = 'rgba(240,248,232,.55)';
+    overlayContext.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  }
+  overlayContext.lineWidth = 2;
+  overlayContext.strokeStyle = '#f2f9e7';
+  overlayContext.fillStyle = '#f2f9e7';
   for (const hand of displayedHands) {
     if (hand.length !== 21) continue;
     for (const [a, b] of HAND_BONES) {
@@ -73,6 +114,8 @@ function renderHandOverlay(now) {
 function resetHandOverlay() {
   targetHands = [];
   displayedHands = [];
+  targetFace = [];
+  displayedFace = [];
   overlayContext.clearRect(0, 0, overlay.width, overlay.height);
 }
 
@@ -183,11 +226,14 @@ function clearRecognition() {
   letterStability.resetCandidate();
   controller?.abort();
   trackingController?.abort();
+  faceController?.abort();
   emotionController?.abort();
   emotionController = null;
   emotionBusy = false;
   trackingController = null;
   tracking = false;
+  faceController = null;
+  faceTracking = false;
   finishHolding = false;
   finishGesture.reset();
   $('#finish-indicator').hidden = true;
@@ -286,11 +332,13 @@ async function startCamera() {
   startButton.disabled = true;
   announce('Requesting camera access…');
   try {
-    stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 960}, height: {ideal: 720}, aspectRatio: {ideal: 4 / 3}, facingMode: 'user'}});
+    stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 1280}, height: {ideal: 720}, aspectRatio: {ideal: 16 / 9}, frameRate: {ideal: 30}, facingMode: 'user'}});
     camera.srcObject = stream;
     await camera.play();
-    trackingCanvas.width = Math.max(320, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
+    trackingCanvas.width = Math.max(480, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
     trackingCanvas.height = Math.round(trackingCanvas.width * camera.videoHeight / camera.videoWidth);
+    faceCanvas.width = Math.max(720, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
+    faceCanvas.height = Math.round(faceCanvas.width * camera.videoHeight / camera.videoWidth);
     emotionCanvas.width = 480;
     emotionCanvas.height = Math.round(480 * camera.videoHeight / camera.videoWidth);
     fitOverlay();
@@ -307,6 +355,8 @@ async function startCamera() {
       ? 'Live fingerspelling started. Show one hand in the camera area.'
       : 'Live translation started. Sign in the camera area.');
     timer = setInterval(sampleFrame, 110);
+    handTimer = setInterval(trackHands, 60);
+    faceTimer = setInterval(trackFace, 150);
   } catch (error) {
     stream?.getTracks().forEach(track => track.stop());
     stream = null;
@@ -318,7 +368,11 @@ async function startCamera() {
 
 function stopCamera() {
   if (timer) clearInterval(timer);
+  if (handTimer) clearInterval(handTimer);
+  if (faceTimer) clearInterval(faceTimer);
   timer = null;
+  handTimer = null;
+  faceTimer = null;
   clearRecognition();
   if (overlayFrame !== null) cancelAnimationFrame(overlayFrame);
   overlayFrame = null;
@@ -341,10 +395,6 @@ async function sampleFrame() {
   if (!stream || paused || sampling || camera.readyState < 2) return;
   sampling = true;
   try {
-    if (!tracking && Date.now() - lastTrackedAt >= 110) {
-      lastTrackedAt = Date.now();
-      trackHands();
-    }
     if (emotionReady && $('#show-emotion').checked && !emotionBusy &&
         Date.now() - lastEmotionAt >= 3000) {
       lastEmotionAt = Date.now();
@@ -371,6 +421,7 @@ async function sampleFrame() {
 }
 
 async function trackHands() {
+  if (!stream || paused || tracking || camera.readyState < 2) return;
   tracking = true;
   const run = generation;
   trackingContext.drawImage(camera, 0, 0, trackingCanvas.width, trackingCanvas.height);
@@ -418,6 +469,36 @@ async function trackHands() {
     if (run === generation) {
       tracking = false;
       trackingController = null;
+    }
+  }
+}
+
+async function trackFace() {
+  if (!stream || paused || faceTracking || camera.readyState < 2) return;
+  faceTracking = true;
+  const run = generation;
+  faceContext.drawImage(camera, 0, 0, faceCanvas.width, faceCanvas.height);
+  const blob = await new Promise(resolve => faceCanvas.toBlob(resolve, 'image/jpeg', 0.65));
+  if (!blob || run !== generation || !stream || paused) {
+    faceTracking = false;
+    return;
+  }
+  const form = new FormData();
+  form.append('frame', blob, 'face-landmarks.jpg');
+  faceController = new AbortController();
+  try {
+    const response = await fetch('/api/face-track', {method: 'POST', body: form,
+      signal: faceController.signal});
+    if (!response.ok) return;
+    const data = await response.json();
+    if (run !== generation || !stream || paused) return;
+    targetFace = data.face || [];
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) targetFace = [];
+  } finally {
+    if (run === generation) {
+      faceTracking = false;
+      faceController = null;
     }
   }
 }

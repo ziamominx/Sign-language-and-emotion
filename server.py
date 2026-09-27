@@ -26,6 +26,8 @@ alphabet_recognizer = None
 alphabet_recognizer_lock = Lock()
 tracker = None
 tracker_lock = RLock()
+face_tracker = None
+face_tracker_lock = RLock()
 
 
 def get_tracker():
@@ -38,6 +40,18 @@ def get_tracker():
                     static_image_mode=False, max_num_hands=2, model_complexity=1,
                     min_detection_confidence=0.55, min_tracking_confidence=0.5)
     return tracker
+
+
+def get_face_tracker():
+    global face_tracker
+    if face_tracker is None:
+        with face_tracker_lock:
+            if face_tracker is None:
+                face_tracker = mp.solutions.face_mesh.FaceMesh(
+                    static_image_mode=False, max_num_faces=1,
+                    refine_landmarks=False, min_detection_confidence=0.35,
+                    min_tracking_confidence=0.45)
+    return face_tracker
 
 
 def _open_palm(landmarks):
@@ -212,7 +226,8 @@ def track_hands():
         return jsonify({"error": "The camera frame could not be read"}), 422
     try:
         with tracker_lock:
-            result = get_tracker().process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            # Match the original desktop preview: detect on the mirrored frame.
+            result = get_tracker().process(cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB))
         landmarks = result.multi_hand_landmarks or []
         return jsonify({
             "hands": [[[round(point.x, 4), round(point.y, 4)] for point in hand.landmark]
@@ -223,6 +238,36 @@ def track_hands():
     except Exception:
         app.logger.exception("Hand tracking failed")
         return jsonify({"error": "Hand tracking failed"}), 500
+
+
+@app.post("/api/face-track")
+def track_face():
+    """Provide the face outline and feature landmarks in preview coordinates."""
+    upload = request.files.get("frame")
+    if upload is None:
+        return jsonify({"error": "Send one JPEG camera frame in the frame field"}), 400
+    data = upload.read()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "The camera frame must be a JPEG image"}), 422
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or min(image.shape[:2]) < 120:
+        return jsonify({"error": "The camera frame could not be read"}), 422
+    try:
+        with face_tracker_lock:
+            result = get_face_tracker().process(
+                cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB))
+        if not result.multi_face_landmarks:
+            return jsonify({"face": None, "box": None})
+        face = result.multi_face_landmarks[0].landmark
+        points = [[round(point.x, 4), round(point.y, 4)] for point in face]
+        return jsonify({"face": points,
+                        "box": [min(point[0] for point in points),
+                                min(point[1] for point in points),
+                                max(point[0] for point in points),
+                                max(point[1] for point in points)]})
+    except Exception:
+        app.logger.exception("Face tracking failed")
+        return jsonify({"error": "Face tracking failed"}), 500
 
 
 @app.get("/api/emotion/status")
