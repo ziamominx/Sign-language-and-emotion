@@ -15,6 +15,8 @@ Open **http://127.0.0.1:8000** in a browser. You can also run `run_web.bat`. On 
 
 Click **Start live translation**, allow camera access, and frame your upper body and hands. Sign one isolated ASL word at a time, pausing between words. The live guess appears over the camera view; confident results enter the message automatically and are spoken when **Speak recognized words aloud** is checked. Tap a candidate to correct or manually add a word. **Pause translation**, **Stop camera**, **Undo last**, **Clear**, and **Speak message** are available. The server needs to stay running while the page is open.
 
+The site checks consecutive predictions before automatically adding a word. If hands or the upper body are lost, it shows specific framing guidance. An independent hand detector can recover hands missed by the main body tracker; this adds roughly 0.35 seconds to a 16-frame clip when needed on the tested machine.
+
 ## Scope and accuracy
 
 This is a research prototype, not a complete or certified ASL interpreter. The [SignBart project](https://github.com/TinhNguyen2312/SignBart) reports **68% accuracy on its WLASL-2000 evaluation split**; that result is not a guarantee for a live webcam or an individual signer. The model only classifies short isolated clips among its 2,000 labels. It cannot understand continuous ASL, facial grammar, signs outside the vocabulary, or translate full ASL sentences into English. The displayed percentages are model scores, not verified probabilities of correctness. Automatic additions may be wrong, so review the message before important communication. Initial analysis needs roughly 1.8 seconds of camera frames plus local processing; this is continuous, but not zero-latency translation.

@@ -193,12 +193,12 @@ async function recognizeLive(clip) {
     if (!data.visible) {
       stability.observe(data);
       $('#live-guess').textContent = 'Waiting for a sign';
-      $('#live-detail').textContent = 'Keep your upper body and hands in view';
+      $('#live-detail').textContent = data.guidance || 'Keep your upper body and hands in view';
       renderSuggestions();
-      announce('Live camera is running. Show a sign when ready.');
+      announce(data.guidance || 'Live camera is running. Show a sign when ready.');
       return;
     }
-    const [first, second] = data.suggestions;
+    const [first] = data.suggestions;
     $('#live-guess').textContent = first.label;
     $('#live-detail').textContent = `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
     renderSuggestions(data.suggestions);

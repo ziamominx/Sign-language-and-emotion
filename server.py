@@ -1,6 +1,7 @@
 """Local website for pretrained, isolated ASL word recognition."""
 
 from pathlib import Path
+from contextlib import ExitStack
 from threading import Lock
 from time import perf_counter
 
@@ -29,31 +30,84 @@ def get_recognizer():
     return recognizer
 
 
-def extract_keypoints(files):
+def _hands_by_side(result):
+    """Map Hands' selfie-image labels to anatomical sides in our raw frames."""
+    sides = {}
+    landmarks = result.multi_hand_landmarks or []
+    handedness = result.multi_handedness or []
+    for hand, classification in zip(landmarks, handedness):
+        if not classification.classification:
+            continue
+        label = classification.classification[0].label
+        # Browser frames are not flipped for inference. MediaPipe Hands assumes
+        # mirrored input, while Holistic's left/right slots are anatomical.
+        if label == "Left":
+            sides["right"] = hand.landmark
+        elif label == "Right":
+            sides["left"] = hand.landmark
+    return sides
+
+
+def _visibility_guidance(hand_ratio, pose_ratio):
+    if hand_ratio < 0.4 and pose_ratio < 0.4:
+        return "Step back and center your head, shoulders, and signing hands in the camera."
+    if hand_ratio < 0.4:
+        return "Show your signing hands clearly inside the camera frame."
+    if pose_ratio < 0.4:
+        return "Step back until your head and shoulders are visible with your hands."
+    return "Your upper body and signing hands are visible."
+
+
+def extract_keypoints(files, diagnostics=None):
     frames = []
     hand_frames = 0
     pose_frames = 0
-    with mp.solutions.holistic.Holistic(
+    fallback_frames = 0
+    with ExitStack() as stack:
+        holistic = stack.enter_context(mp.solutions.holistic.Holistic(
             static_image_mode=False, model_complexity=0,
-            min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+            min_detection_confidence=0.5, min_tracking_confidence=0.5))
+        hands = None
         for upload in files:
             data = np.frombuffer(upload.read(), np.uint8)
             image = cv2.imdecode(data, cv2.IMREAD_COLOR)
             if image is None or image.shape[0] < 120 or image.shape[1] < 120:
                 raise ValueError("The camera frames could not be read")
             image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_AREA)
-            result = holistic.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            result = holistic.process(rgb)
             points = np.zeros((75, 2), dtype=np.float32)
             if result.pose_landmarks:
                 pose_frames += 1
                 points[:33] = [(p.x, p.y) for p in result.pose_landmarks.landmark]
-            if result.left_hand_landmarks:
+            left = result.left_hand_landmarks.landmark if result.left_hand_landmarks else None
+            right = result.right_hand_landmarks.landmark if result.right_hand_landmarks else None
+            if left is None or right is None:
+                if hands is None:
+                    hands = stack.enter_context(mp.solutions.hands.Hands(
+                        static_image_mode=False, max_num_hands=2, model_complexity=0,
+                        min_detection_confidence=0.5, min_tracking_confidence=0.5))
+                recovered = _hands_by_side(hands.process(rgb))
+                recovered_side = False
+                if left is None and recovered.get("left") is not None:
+                    left = recovered["left"]
+                    recovered_side = True
+                if right is None and recovered.get("right") is not None:
+                    right = recovered["right"]
+                    recovered_side = True
+                if recovered_side:
+                    fallback_frames += 1
+            if left is not None:
                 hand_frames += 1
-                points[33:54] = [(p.x, p.y) for p in result.left_hand_landmarks.landmark]
-            if result.right_hand_landmarks:
-                hand_frames += 1 if not result.left_hand_landmarks else 0
-                points[54:75] = [(p.x, p.y) for p in result.right_hand_landmarks.landmark]
+                points[33:54] = [(p.x, p.y) for p in left]
+            if right is not None:
+                hand_frames += 1 if left is None else 0
+                points[54:75] = [(p.x, p.y) for p in right]
             frames.append(points)
+    if diagnostics is not None:
+        diagnostics.update({"hands": round(hand_frames / len(frames), 2),
+                            "pose": round(pose_frames / len(frames), 2),
+                            "fallback_frames": fallback_frames})
     if hand_frames < len(frames) * 0.4 or pose_frames < len(frames) * 0.4:
         raise ValueError("Keep your upper body and signing hands visible in the camera")
     return np.stack(frames)
@@ -100,12 +154,15 @@ def live():
     if not 12 <= len(files) <= 32:
         return jsonify({"error": "Send between 12 and 32 camera frames"}), 400
     started = perf_counter()
+    visibility = {}
     try:
-        points = extract_keypoints(files)
+        points = extract_keypoints(files, diagnostics=visibility)
         predictions = get_recognizer().predict(points)
     except ValueError as exc:
         if str(exc) == "Keep your upper body and signing hands visible in the camera":
             return jsonify({"visible": False, "suggestions": [], "uncertain": True,
+                            "visibility": visibility,
+                            "guidance": _visibility_guidance(visibility["hands"], visibility["pose"]),
                             "processing_ms": round((perf_counter() - started) * 1000)})
         return jsonify({"error": str(exc)}), 422
     except Exception:
@@ -115,6 +172,8 @@ def live():
         predictions[0]["score"] - predictions[1]["score"] < 0.10)
     return jsonify({"visible": True, "suggestions": predictions, "uncertain": uncertain,
                     "frames": len(points),
+                    "visibility": visibility,
+                    "guidance": _visibility_guidance(visibility["hands"], visibility["pose"]),
                     "processing_ms": round((perf_counter() - started) * 1000)})
 
 
