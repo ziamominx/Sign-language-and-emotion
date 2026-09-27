@@ -1,77 +1,102 @@
-const camera = document.querySelector('#camera');
-const cameraFrame = document.querySelector('#camera-frame');
-const cameraButton = document.querySelector('#camera-button');
-const captureButton = document.querySelector('#capture-button');
-const cameraState = document.querySelector('#camera-state');
-const modelPill = document.querySelector('#model-pill');
-const placeholder = document.querySelector('#camera-placeholder');
-const progress = document.querySelector('#record-progress');
-const countdown = document.querySelector('#countdown');
-const suggestions = document.querySelector('#suggestions');
-const message = document.querySelector('#message');
-const speakButton = document.querySelector('#speak-button');
-const undoButton = document.querySelector('#undo-button');
-const clearButton = document.querySelector('#clear-button');
-const statusMessage = document.querySelector('#status-message');
-
-let stream = null;
-let modelReady = false;
-let capturing = false;
+const $ = selector => document.querySelector(selector);
+const camera = $('#camera');
+const frame = $('#camera-frame');
+const startButton = $('#camera-button');
+const pauseButton = $('#capture-button');
+const status = $('#status-message');
 const words = [];
+const canvas = document.createElement('canvas');
+canvas.width = 640;
+canvas.height = 480;
+const context = canvas.getContext('2d', {alpha: false});
+let stream = null, modelReady = false, paused = false, timer = null;
+let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
+let candidate = '', candidateCount = 0, lastAccepted = '', lastAcceptedAt = 0;
 
-function setStatus(text, isError = false) {
-  statusMessage.textContent = text;
-  statusMessage.classList.toggle('error', isError);
+function announce(text, error = false) {
+  status.textContent = text;
+  status.classList.toggle('error', error);
 }
 
-function renderMessage() {
-  message.replaceChildren();
+function renderWords() {
+  $('#message').replaceChildren();
   if (!words.length) {
     const empty = document.createElement('span');
     empty.className = 'message-empty';
-    empty.textContent = 'Your words will appear here.';
-    message.append(empty);
-  } else {
-    for (const word of words) {
-      const chip = document.createElement('span');
-      chip.className = 'word-chip';
-      chip.textContent = word;
-      message.append(chip);
-    }
+    empty.textContent = 'Recognized signs will appear here automatically.';
+    $('#message').append(empty);
   }
-  speakButton.disabled = !words.length;
-  undoButton.disabled = !words.length;
-  clearButton.disabled = !words.length;
+  for (const word of words) {
+    const chip = document.createElement('span');
+    chip.className = 'word-chip';
+    chip.textContent = word;
+    $('#message').append(chip);
+  }
+  for (const button of ['#speak-button', '#undo-button', '#clear-button']) $(button).disabled = !words.length;
 }
 
-function renderSuggestions(items) {
-  suggestions.replaceChildren();
-  if (!items || !items.length) {
+function speak(text, replace = false) {
+  if (!('speechSynthesis' in window)) return false;
+  if (replace) window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'en-US';
+  utterance.rate = 0.9;
+  window.speechSynthesis.speak(utterance);
+  return true;
+}
+
+function addWord(label, automatic = false) {
+  words.push(label);
+  renderWords();
+  lastAccepted = label;
+  lastAcceptedAt = Date.now();
+  candidate = '';
+  candidateCount = 0;
+  if (automatic && $('#auto-speak').checked) speak(label);
+  announce(`${automatic ? 'Recognized' : 'Added'} “${label}”. Keep signing to continue.`);
+}
+
+function renderSuggestions(items = []) {
+  $('#suggestions').replaceChildren();
+  if (!items.length) {
     const empty = document.createElement('p');
     empty.className = 'suggestions-empty';
-    empty.textContent = 'Capture a sign to see suggestions.';
-    suggestions.append(empty);
-    return;
+    empty.textContent = 'Live suggestions appear while you sign.';
+    $('#suggestions').append(empty);
   }
   for (const item of items) {
-    const option = document.createElement('button');
-    option.type = 'button';
-    option.className = 'suggestion';
-    option.setAttribute('aria-label', `Add ${item.label} to message`);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'suggestion';
+    button.setAttribute('aria-label', `Add ${item.label} to message`);
     const label = document.createElement('span');
     label.textContent = item.label;
     const score = document.createElement('small');
     score.textContent = `${Math.round(item.score * 100)}% model score  + ADD`;
-    option.append(label, score);
-    option.addEventListener('click', () => {
-      words.push(item.label);
-      renderMessage();
-      renderSuggestions([]);
-      setStatus(`Added “${item.label}”. Capture another sign or speak your message.`);
-      captureButton.focus();
-    });
-    suggestions.append(option);
+    button.append(label, score);
+    button.addEventListener('click', () => addWord(item.label));
+    $('#suggestions').append(button);
   }
+}
+
+function clearRecognition() {
+  samples = [];
+  candidate = '';
+  candidateCount = 0;
+  controller?.abort();
+  controller = null;
+  generation++;
+  analyzing = false;
+}
+
+function updateControls() {
+  startButton.textContent = stream ? 'Stop camera' : 'Start live translation';
+  startButton.disabled = !modelReady && !stream;
+  pauseButton.disabled = !stream;
+  pauseButton.textContent = paused ? 'Resume translation' : 'Pause translation';
+  $('#camera-state').textContent = !stream ? 'Camera off' : paused ? 'Paused' : 'Translating live';
+  frame.classList.toggle('active', !!stream);
+  frame.classList.toggle('paused', paused);
 }
 
 async function checkModel() {
@@ -80,110 +105,151 @@ async function checkModel() {
     const data = await response.json();
     if (!response.ok || !data.ready) throw new Error(data.error || 'Model unavailable');
     modelReady = true;
-    modelPill.textContent = `${data.labels.toLocaleString()} signs loaded`;
-    modelPill.classList.add('ready');
-    captureButton.disabled = !stream;
-    setStatus('Model ready. Enable your camera to begin.');
+    $('#model-pill').textContent = `${data.labels.toLocaleString()} signs loaded`;
+    $('#model-pill').classList.add('ready');
+    updateControls();
+    announce('Model ready. Start live translation to begin.');
   } catch (error) {
-    modelPill.textContent = 'Model unavailable';
-    modelPill.classList.add('error');
-    setStatus(`Could not load the ASL model: ${error.message}`, true);
+    $('#model-pill').textContent = 'Model unavailable';
+    $('#model-pill').classList.add('error');
+    announce(`Could not load the ASL model: ${error.message}`, true);
   }
 }
 
-async function enableCamera() {
-  if (stream) return;
+async function startCamera() {
+  if (!modelReady || stream) return;
   if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus('Camera access needs localhost or a secure HTTPS connection.', true);
+    announce('Camera access needs localhost or a secure HTTPS connection.', true);
     return;
   }
-  cameraButton.disabled = true;
-  setStatus('Requesting camera access…');
+  startButton.disabled = true;
+  announce('Requesting camera access…');
   try {
     stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 960}, height: {ideal: 720}, facingMode: 'user'}});
     camera.srcObject = stream;
     await camera.play();
-    cameraFrame.classList.add('active');
-    placeholder.hidden = true;
-    cameraButton.textContent = 'Camera enabled';
-    cameraState.textContent = 'Camera live';
-    captureButton.disabled = !modelReady;
-    setStatus(modelReady ? 'Frame your upper body and capture one sign.' : 'Camera ready. Waiting for model.');
+    stream.getVideoTracks()[0].addEventListener('ended', stopCamera, {once: true});
+    $('#camera-placeholder').hidden = true;
+    paused = false;
+    updateControls();
+    $('#live-guess').textContent = 'Watching for a sign';
+    $('#live-detail').textContent = 'Sign one word at a time';
+    announce('Live translation started. Sign in the camera area.');
+    timer = setInterval(sampleFrame, 110);
   } catch (error) {
-    cameraButton.disabled = false;
-    setStatus(`Camera unavailable: ${error.message}`, true);
+    stream?.getTracks().forEach(track => track.stop());
+    stream = null;
+    camera.srcObject = null;
+    updateControls();
+    announce(`Camera unavailable: ${error.message}`, true);
   }
 }
 
-const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+function stopCamera() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  clearRecognition();
+  stream?.getTracks().forEach(track => track.stop());
+  stream = null;
+  camera.srcObject = null;
+  paused = false;
+  $('#camera-placeholder').hidden = false;
+  $('#live-guess').textContent = 'Camera off';
+  $('#live-detail').textContent = 'Start live translation';
+  renderSuggestions();
+  updateControls();
+  announce('Camera stopped. Your message is still here.');
+}
 
-async function captureSign() {
-  if (!stream || !modelReady || capturing) return;
-  capturing = true;
-  captureButton.disabled = true;
-  cameraButton.disabled = true;
-  progress.hidden = false;
-  renderSuggestions([]);
+async function sampleFrame() {
+  if (!stream || paused || sampling || camera.readyState < 2) return;
+  sampling = true;
   try {
-    setStatus('Get ready. Keep shoulders and hands in view.');
-    countdown.textContent = 'READY';
-    await sleep(750);
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
-    const context = canvas.getContext('2d', {alpha: false});
-    const form = new FormData();
-    for (let index = 0; index < 24; index++) {
-      if (camera.readyState < 2) throw new Error('Camera feed stopped');
-      countdown.textContent = Math.max(0, (2.4 - index * 0.1)).toFixed(1);
-      const scale = Math.min(canvas.width / camera.videoWidth, canvas.height / camera.videoHeight);
-      const width = camera.videoWidth * scale;
-      const height = camera.videoHeight * scale;
-      context.fillStyle = '#000';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(camera, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.72));
-      if (!blob) throw new Error('Could not capture a camera frame');
-      form.append('frames', blob, `frame-${index}.jpg`);
-      await sleep(100);
-    }
-    progress.hidden = true;
-    setStatus('Analyzing hand and body movement…');
-    const response = await fetch('/api/recognize', {method: 'POST', body: form});
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Recognition failed');
-    renderSuggestions(data.suggestions);
-    setStatus(data.uncertain
-      ? 'Low certainty. Capture again, or choose a suggestion only if you know it is correct.'
-      : 'Choose the intended word from the suggestions. Capture again if none fit.', data.uncertain);
+    const scale = Math.min(canvas.width / camera.videoWidth, canvas.height / camera.videoHeight);
+    const width = camera.videoWidth * scale, height = camera.videoHeight * scale;
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(camera, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.65));
+    if (!blob || !stream || paused) return;
+    samples.push(blob);
+    if (samples.length > 16) samples.shift();
+    if (samples.length === 16 && !analyzing) recognizeLive([...samples]);
   } catch (error) {
-    setStatus(error.message, true);
+    announce(`Could not read camera: ${error.message}`, true);
   } finally {
-    progress.hidden = true;
-    capturing = false;
-    captureButton.disabled = !stream || !modelReady;
-    cameraButton.disabled = !!stream;
+    sampling = false;
   }
 }
 
-cameraButton.addEventListener('click', enableCamera);
-captureButton.addEventListener('click', captureSign);
-speakButton.addEventListener('click', () => {
-  if (!words.length) return;
-  if (!('speechSynthesis' in window)) {
-    setStatus('This browser does not support speech output.', true);
-    return;
+async function recognizeLive(clip) {
+  analyzing = true;
+  const run = generation;
+  const form = new FormData();
+  clip.forEach((blob, index) => form.append('frames', blob, `frame-${index}.jpg`));
+  controller = new AbortController();
+  try {
+    const response = await fetch('/api/live', {method: 'POST', body: form, signal: controller.signal});
+    const data = await response.json();
+    if (run !== generation) return;
+    if (!response.ok) throw new Error(data.error || 'Recognition failed');
+    if (!data.visible) {
+      candidate = '';
+      candidateCount = 0;
+      lastAccepted = '';
+      $('#live-guess').textContent = 'Waiting for a sign';
+      $('#live-detail').textContent = 'Keep your upper body and hands in view';
+      renderSuggestions();
+      announce('Live camera is running. Show a sign when ready.');
+      return;
+    }
+    const [first, second] = data.suggestions;
+    $('#live-guess').textContent = first.label;
+    $('#live-detail').textContent = `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
+    renderSuggestions(data.suggestions);
+    if (data.uncertain) {
+      candidate = '';
+      candidateCount = 0;
+      announce('Unsure of this sign. Try signing clearly or choose a suggestion.');
+      return;
+    }
+    if (candidate === first.label) candidateCount++;
+    else { candidate = first.label; candidateCount = 1; }
+    const strong = first.score >= 0.75 && first.score - second.score >= 0.25;
+    if ((strong || candidateCount >= 2) && first.label !== lastAccepted && Date.now() - lastAcceptedAt >= 1800) {
+      addWord(first.label, true);
+    } else if (!strong && candidateCount < 2) {
+      announce('Checking the sign across another moment…');
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) announce(error.message, true);
+  } finally {
+    if (run === generation) {
+      analyzing = false;
+      controller = null;
+    }
   }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(words.join(' '));
-  utterance.lang = 'en-US';
-  utterance.rate = 0.9;
-  window.speechSynthesis.speak(utterance);
-  setStatus('Speaking your message.');
-});
-undoButton.addEventListener('click', () => { words.pop(); renderMessage(); setStatus('Removed the last word.'); });
-clearButton.addEventListener('click', () => { words.length = 0; renderMessage(); renderSuggestions([]); setStatus('Message cleared.'); });
-window.addEventListener('beforeunload', () => stream?.getTracks().forEach(track => track.stop()));
+}
 
-renderMessage();
+startButton.addEventListener('click', () => stream ? stopCamera() : startCamera());
+pauseButton.addEventListener('click', () => {
+  if (!stream) return;
+  paused = !paused;
+  clearRecognition();
+  updateControls();
+  $('#live-guess').textContent = paused ? 'Translation paused' : 'Watching for a sign';
+  $('#live-detail').textContent = paused ? 'Resume when you are ready' : 'Sign one word at a time';
+  announce(paused ? 'Live translation paused.' : 'Live translation resumed.');
+});
+$('#speak-button').addEventListener('click', () => {
+  if (!words.length) return;
+  announce(speak(words.join(' '), true) ? 'Speaking your message.' : 'This browser does not support speech output.');
+});
+$('#undo-button').addEventListener('click', () => { words.pop(); renderWords(); announce('Removed the last word.'); });
+$('#clear-button').addEventListener('click', () => { words.length = 0; renderWords(); announce('Message cleared.'); });
+window.addEventListener('beforeunload', stopCamera);
+
+renderWords();
+renderSuggestions();
+updateControls();
 checkModel();

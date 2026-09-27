@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from threading import Lock
+from time import perf_counter
 
 import cv2
 import mediapipe as mp
@@ -90,6 +91,31 @@ def recognize():
         predictions[0]["score"] - predictions[1]["score"] < 0.10)
     return jsonify({"suggestions": predictions, "uncertain": uncertain,
                     "frames": len(points)})
+
+
+@app.post("/api/live")
+def live():
+    """Classify a short rolling clip; absence of a signer is a normal live state."""
+    files = request.files.getlist("frames")
+    if not 12 <= len(files) <= 32:
+        return jsonify({"error": "Send between 12 and 32 camera frames"}), 400
+    started = perf_counter()
+    try:
+        points = extract_keypoints(files)
+        predictions = get_recognizer().predict(points)
+    except ValueError as exc:
+        if str(exc) == "Keep your upper body and signing hands visible in the camera":
+            return jsonify({"visible": False, "suggestions": [], "uncertain": True,
+                            "processing_ms": round((perf_counter() - started) * 1000)})
+        return jsonify({"error": str(exc)}), 422
+    except Exception:
+        app.logger.exception("Live recognition failed")
+        return jsonify({"error": "Recognition failed; please try again"}), 500
+    uncertain = predictions[0]["score"] < 0.45 or (
+        predictions[0]["score"] - predictions[1]["score"] < 0.10)
+    return jsonify({"visible": True, "suggestions": predictions, "uncertain": uncertain,
+                    "frames": len(points),
+                    "processing_ms": round((perf_counter() - started) * 1000)})
 
 
 if __name__ == "__main__":

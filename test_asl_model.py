@@ -1,5 +1,6 @@
 import io
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -34,6 +35,26 @@ class ModelTests(unittest.TestCase):
         response = client.post("/api/recognize", data=data, content_type="multipart/form-data")
         self.assertEqual(response.status_code, 422)
         self.assertIn("visible", response.get_json()["error"])
+
+        live_data = {"frames": [(io.BytesIO(encoded.tobytes()), f"frame-{i}.jpg") for i in range(12)]}
+        live_response = client.post("/api/live", data=live_data, content_type="multipart/form-data")
+        self.assertEqual(live_response.status_code, 200)
+        self.assertFalse(live_response.get_json()["visible"])
+        self.assertEqual(live_response.get_json()["suggestions"], [])
+
+    def test_live_recognition_returns_model_predictions(self):
+        client = app.test_client()
+        choices = [{"label": "hello", "score": 0.81}, {"label": "help", "score": 0.09}]
+        with patch("server.extract_keypoints", return_value=np.zeros((16, 75, 2))) as extract:
+            with patch("server.get_recognizer") as get_model:
+                get_model.return_value.predict.return_value = choices
+                data = {"frames": [(io.BytesIO(b"frame"), f"frame-{i}.jpg") for i in range(16)]}
+                response = client.post("/api/live", data=data, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["visible"])
+        self.assertFalse(response.get_json()["uncertain"])
+        self.assertEqual(response.get_json()["suggestions"], choices)
+        extract.assert_called_once()
 
 
 if __name__ == "__main__":
