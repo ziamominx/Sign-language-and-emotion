@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import cv2
 import numpy as np
 
-from server import app
+from server import app, choose_expression
 
 
 def frame():
@@ -51,13 +51,23 @@ class EmotionApiTests(unittest.TestCase):
             detections=[detection])
         with patch('server.find_spec', return_value=object()), \
                 patch('server.mp.solutions.face_detection.FaceDetection', return_value=detector), \
-                patch('server.classify_expression', return_value='Happy') as classify:
+                patch('server.classify_expression', return_value={
+                    'label': 'Happy', 'score': 82.0, 'tentative': False}) as classify:
             response = self.client.post('/api/emotion', data=frame(),
                                         content_type='multipart/form-data')
-        self.assertEqual(response.get_json(), {'visible': True, 'label': 'Happy'})
+        self.assertEqual(response.get_json(), {'visible': True, 'label': 'Happy',
+                                              'score': 82.0, 'tentative': False})
         crop = classify.call_args.args[0]
         self.assertLess(crop.shape[0], 240)
         self.assertLess(crop.shape[1], 320)
+
+    def test_close_happy_or_sad_score_is_shown_as_tentative_instead_of_neutral(self):
+        happy = choose_expression('neutral', {'neutral': 42, 'happy': 36, 'sad': 8})
+        self.assertEqual(happy, {'label': 'Happy', 'score': 36.0, 'tentative': True})
+        sad = choose_expression('neutral', {'neutral': 40, 'happy': 8, 'sad': 35})
+        self.assertEqual(sad['label'], 'Sad')
+        neutral = choose_expression('neutral', {'neutral': 80, 'happy': 7, 'sad': 8})
+        self.assertEqual(neutral['label'], 'Neutral')
 
 
 if __name__ == '__main__':

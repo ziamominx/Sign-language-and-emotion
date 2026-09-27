@@ -27,11 +27,11 @@ class SignStability {
       return null;
     }
     const [first, second] = result.suggestions || [];
-    if (result.uncertain || !first || !second) {
+    if (result.uncertain || !first || (!second && first.source !== 'personal')) {
       this.resetCandidate();
       return null;
     }
-    const margin = first.score - second.score;
+    const margin = first.score - (second?.score || 0);
     const strong = first.score >= 0.75 && margin >= 0.25;
     const moderate = first.score >= 0.55 && margin >= 0.15;
     if (!strong && !moderate) {

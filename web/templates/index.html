@@ -39,12 +39,20 @@
             <div class="camera-placeholder" id="camera-placeholder" aria-hidden="true"><div class="placeholder-glyph">✳</div><p>Camera preview appears here</p></div>
             <div class="frame-corner corner-tl"></div><div class="frame-corner corner-tr"></div><div class="frame-corner corner-bl"></div><div class="frame-corner corner-br"></div>
             <div class="live-result" aria-live="off"><span>LIVE RECOGNITION</span><strong id="live-guess">Camera off</strong><small id="live-detail">Start live translation</small></div>
-            <div id="emotion-panel" class="emotion-panel" hidden><span>FACIAL EXPRESSION</span><strong id="emotion-label">Checking…</strong><small id="emotion-detail">Estimated from your face</small></div>
             <div id="finish-indicator" class="finish-indicator" hidden>Hold both hands open to speak message <strong id="finish-progress">0%</strong></div>
+            <div id="record-progress" class="record-progress" hidden><span>LEARNING YOUR SIGN</span><strong id="record-count">Get ready</strong></div>
           </div>
+          <span id="emotion-live" class="visually-hidden" role="status"></span>
           <div class="camera-actions"><button class="button button-primary" id="camera-button" type="button" disabled>Start live translation</button><button class="button button-light" id="capture-button" type="button" disabled>Pause translation</button></div>
           <p class="camera-hint"><span id="framing-hint">Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.</span> <label class="speech-toggle"><input id="auto-speak" type="checkbox" checked> Speak recognized words aloud</label> <label class="speech-toggle"><input id="show-emotion" type="checkbox" checked> Show facial expression estimate</label></p>
           <p id="mode-hint" class="mode-hint">ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat a word. Hold both hands open for 1.5 seconds to speak the full message.</p>
+          <section class="teach-panel" aria-labelledby="teach-title">
+            <div><p class="eyebrow">YOUR VOCABULARY</p><h3 id="teach-title">Teach a sign</h3></div>
+            <p>Name a sign, then record it three times with slight changes in speed and position. The saved coordinates are used automatically when you sign again.</p>
+            <div class="teach-form"><label for="sign-label">Sign or word</label><input id="sign-label" type="text" maxlength="40" placeholder="e.g. my name" autocomplete="off"><button id="record-example" class="button button-primary" type="button" disabled>Record example</button></div>
+            <p id="training-status" class="training-status" role="status">Start the camera to record an example.</p>
+            <ul id="personal-signs" class="personal-signs" aria-label="Saved personal signs"></ul>
+          </section>
         </section>
 
         <section class="response-panel" aria-labelledby="response-title">

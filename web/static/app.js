@@ -27,9 +27,11 @@ let samples = [], sampling = false, analyzing = false, controller = null, genera
 let tracking = false, trackingController = null, finishHolding = false;
 let poseTracking = false, poseController = null, latestPose = null, latestPoseAt = 0, lastWordAnalysisAt = 0;
 let faceTracking = false, faceController = null;
+let recording = null, trainingBusy = false;
 let targetHands = [], displayedHands = [], overlayFrame = null, lastOverlayFrame = 0;
 let targetFace = [], displayedFace = [];
 let emotionReady = false, emotionBusy = false, emotionController = null, lastEmotionAt = 0;
+let emotionLabel = '', emotionScore = 0, emotionTentative = false, emotionVisible = false;
 const stability = new SignStability();
 const letterStability = new LetterStability();
 const finishGesture = new FinishGesture();
@@ -93,6 +95,17 @@ function renderHandOverlay(now) {
     const y2 = Math.min(overlay.height, Math.max(...ys) * overlay.height + 6);
     overlayContext.strokeStyle = 'rgba(240,248,232,.55)';
     overlayContext.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (emotionVisible && $('#show-emotion').checked) {
+      const caption = `${emotionLabel}${emotionTentative ? '?' : ''} · ${Math.round(emotionScore)}%`;
+      overlayContext.font = '600 14px Manrope, Arial, sans-serif';
+      const width = overlayContext.measureText(caption).width + 20;
+      const left = Math.max(4, Math.min(overlay.width - width - 4, (x1 + x2 - width) / 2));
+      const top = Math.max(4, y1 - 30);
+      overlayContext.fillStyle = 'rgba(20,26,24,.9)';
+      overlayContext.fillRect(left, top, width, 24);
+      overlayContext.fillStyle = '#dff29c';
+      overlayContext.fillText(caption, left + 10, top + 17);
+    }
   }
   overlayContext.lineWidth = 2;
   overlayContext.strokeStyle = '#f2f9e7';
@@ -217,7 +230,8 @@ function renderSuggestions(items = []) {
     const label = document.createElement('span');
     label.textContent = item.label;
     const score = document.createElement('small');
-    score.textContent = `${Math.round(item.score * 100)}% model score  + ADD`;
+    score.textContent = item.source === 'personal' ? 'Saved coordinate match  + ADD'
+      : `${Math.round(item.score * 100)}% model score  + ADD`;
     button.append(label, score);
     button.addEventListener('click', () => recognitionMode === 'words' ? addWord(item.label) : addLetter(item.label));
     $('#suggestions').append(button);
@@ -226,6 +240,8 @@ function renderSuggestions(items = []) {
 
 function clearRecognition() {
   samples = [];
+  recording = null;
+  $('#record-progress').hidden = true;
   latestPose = null;
   latestPoseAt = 0;
   lastWordAnalysisAt = 0;
@@ -236,6 +252,8 @@ function clearRecognition() {
   poseController?.abort();
   faceController?.abort();
   emotionController?.abort();
+  emotionVisible = false;
+  $('#emotion-live').textContent = '';
   emotionController = null;
   emotionBusy = false;
   trackingController = null;
@@ -251,6 +269,80 @@ function clearRecognition() {
   controller = null;
   generation++;
   analyzing = false;
+  updateTrainingControls();
+}
+
+function updateTrainingControls() {
+  const button = $('#record-example');
+  button.disabled = !stream || paused || recognitionMode !== 'words' || trainingBusy;
+  button.textContent = recording ? 'Cancel recording' : 'Record example';
+  if (stream && $('#training-status').textContent === 'Start the camera to record an example.') {
+    $('#training-status').textContent = 'Enter a sign label and record it three times.';
+  }
+}
+
+function renderPersonalSigns(signs) {
+  const list = $('#personal-signs');
+  list.replaceChildren();
+  for (const sign of signs) {
+    const item = document.createElement('li');
+    const name = document.createElement('strong');
+    name.textContent = sign.label;
+    const count = document.createElement('span');
+    count.className = sign.ready ? 'ready' : '';
+    count.textContent = sign.ready ? ` · ${sign.examples} examples · ready`
+      : ` · ${sign.examples}/3 examples`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.setAttribute('aria-label', `Remove saved sign ${sign.label}`);
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Remove all saved examples for “${sign.label}”?`)) return;
+      const response = await fetch(`/api/personal-signs/${encodeURIComponent(sign.label)}`, {method: 'DELETE'});
+      const data = await response.json();
+      if (!response.ok) {
+        $('#training-status').textContent = data.error || 'Could not remove the saved sign.';
+        return;
+      }
+      renderPersonalSigns(data.signs);
+      $('#training-status').textContent = `Removed “${sign.label}”.`;
+    });
+    item.append(name, count, remove);
+    list.append(item);
+  }
+}
+
+async function loadPersonalSigns() {
+  try {
+    const response = await fetch('/api/personal-signs');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not load your saved signs');
+    renderPersonalSigns(data.signs);
+  } catch (error) {
+    $('#training-status').textContent = error.message;
+  }
+}
+
+async function saveRecording(record) {
+  trainingBusy = true;
+  updateTrainingControls();
+  $('#training-status').textContent = `Saving “${record.label}” coordinates…`;
+  try {
+    const response = await fetch('/api/personal-signs', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label: record.label, frames: record.frames})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save this example');
+    renderPersonalSigns(data.signs);
+    $('#training-status').textContent = data.saved.ready
+      ? `“${data.saved.label}” is ready. Sign it again to test recognition.`
+      : `Saved example ${data.saved.examples}/3 for “${data.saved.label}”. Record it again.`;
+  } catch (error) {
+    $('#training-status').textContent = error.message;
+  } finally {
+    trainingBusy = false;
+    updateTrainingControls();
+  }
 }
 
 function updateControls() {
@@ -261,12 +353,14 @@ function updateControls() {
   $('#camera-state').textContent = !stream ? 'Camera off' : paused ? 'Paused' : 'Translating live';
   frame.classList.toggle('active', !!stream);
   frame.classList.toggle('paused', paused);
+  updateTrainingControls();
 }
 
 function setMode(next) {
   if (next === recognitionMode || (next === 'letters' && !alphabetReady)) return;
   clearRecognition();
   recognitionMode = next;
+  updateTrainingControls();
   stability.rearm();
   letterStability.rearm();
   for (const [mode, selector] of [['words', '#mode-words'], ['letters', '#mode-letters']]) {
@@ -351,8 +445,8 @@ async function startCamera() {
     poseCanvas.height = trackingCanvas.height;
     faceCanvas.width = Math.max(720, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
     faceCanvas.height = Math.round(faceCanvas.width * camera.videoHeight / camera.videoWidth);
-    emotionCanvas.width = 480;
-    emotionCanvas.height = Math.round(480 * camera.videoHeight / camera.videoWidth);
+    emotionCanvas.width = 960;
+    emotionCanvas.height = Math.round(960 * camera.videoHeight / camera.videoWidth);
     fitOverlay();
     lastOverlayFrame = 0;
     overlayFrame = requestAnimationFrame(renderHandOverlay);
@@ -360,7 +454,6 @@ async function startCamera() {
     $('#camera-placeholder').hidden = true;
     paused = false;
     updateControls();
-    $('#emotion-panel').hidden = !emotionReady || !$('#show-emotion').checked;
     $('#live-guess').textContent = recognitionMode === 'letters' ? 'Watching for a hand' : 'Watching for a sign';
     $('#live-detail').textContent = recognitionMode === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
     announce(recognitionMode === 'letters'
@@ -391,13 +484,13 @@ function stopCamera() {
   clearRecognition();
   if (overlayFrame !== null) cancelAnimationFrame(overlayFrame);
   overlayFrame = null;
-  $('#emotion-panel').hidden = true;
   stability.rearm();
   letterStability.rearm();
   stream?.getTracks().forEach(track => track.stop());
   stream = null;
   camera.srcObject = null;
   paused = false;
+  if (!trainingBusy) $('#training-status').textContent = 'Start the camera to record an example.';
   $('#camera-placeholder').hidden = false;
   $('#live-guess').textContent = 'Camera off';
   $('#live-detail').textContent = 'Start live translation';
@@ -411,7 +504,7 @@ async function sampleFrame() {
   sampling = true;
   try {
     if (emotionReady && $('#show-emotion').checked && !emotionBusy &&
-        Date.now() - lastEmotionAt >= 3000) {
+        Date.now() - lastEmotionAt >= 1200) {
       lastEmotionAt = Date.now();
       recognizeEmotion();
     }
@@ -450,6 +543,7 @@ async function trackHands() {
     const data = await response.json();
     if (run !== generation || !stream || paused) return;
     targetHands = (data.hands || []).sort((a, b) => a[0][0] - b[0][0]);
+    const recordingThisFrame = Boolean(recording);
     if (recognitionMode === 'words' && latestPose && Date.now() - latestPoseAt < 250) {
       const emptyHand = () => Array.from({length: 21}, () => [0, 0]);
       const mapped = points => letterboxLandmarks(points, camera.videoWidth, camera.videoHeight);
@@ -458,15 +552,35 @@ async function trackHands() {
         ...(data.model_hands?.left ? mapped(data.model_hands.left) : emptyHand()),
         ...(data.model_hands?.right ? mapped(data.model_hands.right) : emptyHand())];
       if (points.length === 75) {
-        samples.push(points);
-        if (samples.length > 18) samples.shift();
         const now = Date.now();
-        if (samples.length === 18 && !analyzing && !finishHolding &&
-            now - lastWordAnalysisAt >= 280) {
-          lastWordAnalysisAt = now;
-          recognizeLive([...samples]);
+        if (recording) {
+          if (now >= recording.readyAt) {
+            recording.frames.push(points);
+            $('#record-count').textContent = `${recording.frames.length}/18 frames`;
+            if (recording.frames.length === 18) {
+              const completed = recording;
+              recording = null;
+              $('#record-progress').hidden = true;
+              samples = [];
+              saveRecording(completed);
+            }
+          }
+        } else if (!trainingBusy) {
+          samples.push(points);
+          if (samples.length > 18) samples.shift();
+          if (samples.length === 18 && !analyzing && !finishHolding &&
+              now - lastWordAnalysisAt >= 280) {
+            lastWordAnalysisAt = now;
+            recognizeLive([...samples]);
+          }
         }
       }
+    }
+    if (recordingThisFrame || trainingBusy) {
+      finishHolding = false;
+      finishGesture.reset();
+      $('#finish-indicator').hidden = true;
+      return;
     }
     const hasMessage = Boolean(messageText());
     const wasFinishing = finishHolding;
@@ -581,14 +695,16 @@ async function recognizeEmotion() {
     const data = await response.json();
     if (run !== generation || !stream || paused || !$('#show-emotion').checked) return;
     if (!response.ok) throw new Error(data.error || 'Expression analysis unavailable');
-    $('#emotion-panel').hidden = false;
-    $('#emotion-label').textContent = data.visible ? data.label : 'No face detected';
-    $('#emotion-detail').textContent = data.visible ? 'Visual estimate · may be wrong' : 'Keep your face in view';
+    emotionVisible = Boolean(data.visible);
+    emotionLabel = data.label || '';
+    emotionScore = data.score || 0;
+    emotionTentative = Boolean(data.tentative);
+    $('#emotion-live').textContent = emotionVisible
+      ? `Estimated facial expression: ${emotionLabel}${emotionTentative ? ', tentative' : ''}` : '';
   } catch (error) {
     if (error.name !== 'AbortError' && run === generation) {
-      $('#emotion-label').textContent = 'Unavailable';
-      $('#emotion-detail').textContent = 'Expression model could not respond';
-      $('#emotion-panel').hidden = false;
+      emotionVisible = false;
+      $('#emotion-live').textContent = '';
     }
   } finally {
     if (run === generation) {
@@ -619,7 +735,9 @@ async function recognizeLive(clip) {
     }
     const [first] = data.suggestions;
     $('#live-guess').textContent = first.label;
-    $('#live-detail').textContent = `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
+    $('#live-detail').textContent = data.source === 'personal'
+      ? `Saved coordinate match · ${data.processing_ms} ms analysis`
+      : `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
     renderSuggestions(data.suggestions);
     const accepted = stability.observe(data);
     if (data.uncertain) {
@@ -681,12 +799,38 @@ async function recognizeLetter(blob) {
 }
 
 startButton.addEventListener('click', () => stream ? stopCamera() : startCamera());
+$('#record-example').addEventListener('click', () => {
+  if (recording) {
+    recording = null;
+    $('#record-progress').hidden = true;
+    $('#training-status').textContent = 'Recording cancelled.';
+    updateTrainingControls();
+    return;
+  }
+  if (!stream || paused || recognitionMode !== 'words' || trainingBusy) return;
+  const label = $('#sign-label').value.trim();
+  if (!/^[A-Za-z][A-Za-z '\-]{0,39}$/.test(label)) {
+    $('#training-status').textContent = 'Enter a short sign name using letters and spaces.';
+    $('#sign-label').focus();
+    return;
+  }
+  samples = [];
+  controller?.abort();
+  recording = {label, readyAt: Date.now() + 800, frames: []};
+  $('#record-progress').hidden = false;
+  $('#record-count').textContent = 'Get ready';
+  $('#training-status').textContent = `Get ready to sign “${label}”, then hold the movement in view.`;
+  updateTrainingControls();
+});
 $('#mode-words').addEventListener('click', () => setMode('words'));
 $('#mode-letters').addEventListener('click', () => setMode('letters'));
 $('#show-emotion').addEventListener('change', () => {
-  $('#emotion-panel').hidden = !stream || !$('#show-emotion').checked;
   if ($('#show-emotion').checked) lastEmotionAt = 0;
-  else emotionController?.abort();
+  else {
+    emotionController?.abort();
+    emotionVisible = false;
+    $('#emotion-live').textContent = '';
+  }
 });
 window.addEventListener('resize', fitOverlay);
 camera.addEventListener('resize', fitOverlay);
@@ -727,3 +871,4 @@ updateControls();
 checkModel();
 checkAlphabet();
 checkEmotion();
+loadPersonalSigns();

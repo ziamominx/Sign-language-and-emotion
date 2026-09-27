@@ -14,6 +14,7 @@ from flask import Flask, jsonify, render_template, request
 
 from asl_model import ASLRecognizer
 from alphabet_model import ASLAlphabetRecognizer
+from personal_signs import PersonalSigns
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +31,8 @@ face_tracker = None
 face_tracker_lock = RLock()
 pose_tracker = None
 pose_tracker_lock = RLock()
+personal_signs = None
+personal_signs_lock = Lock()
 
 
 def get_tracker():
@@ -67,6 +70,15 @@ def get_pose_tracker():
     return pose_tracker
 
 
+def get_personal_signs():
+    global personal_signs
+    if personal_signs is None:
+        with personal_signs_lock:
+            if personal_signs is None:
+                personal_signs = PersonalSigns()
+    return personal_signs
+
+
 def _open_palm(landmarks):
     """Require four extended fingers, regardless of hand rotation or mirror."""
     wrist = np.array([landmarks[0].x, landmarks[0].y])
@@ -89,10 +101,23 @@ def classify_expression(face_image):
                                 silent=True)
     if isinstance(analysis, list):
         analysis = analysis[0]
-    label = str(analysis["dominant_emotion"]).lower()
+    return choose_expression(analysis["dominant_emotion"], analysis["emotion"])
+
+
+def choose_expression(dominant, raw_scores):
+    """Use the full score distribution when a mild expression nearly ties neutral."""
+    scores = {key: float(value) for key, value in raw_scores.items()}
+    label = str(dominant).lower()
     if label not in {"angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"}:
         raise ValueError("Unknown expression label")
-    return label.capitalize()
+    tentative = False
+    if label == "neutral":
+        expressive = max(("happy", "sad"), key=lambda key: scores.get(key, 0))
+        if scores.get(expressive, 0) >= 25 and scores[expressive] >= scores.get("neutral", 0) * 0.75:
+            label = expressive
+            tentative = True
+    return {"label": label.capitalize(), "score": round(scores.get(label, 0), 1),
+            "tentative": tentative}
 
 
 def get_recognizer():
@@ -345,15 +370,15 @@ def emotion_predict():
         if not found.detections:
             return jsonify({"visible": False, "label": None})
         box = found.detections[0].location_data.relative_bounding_box
-        pad_x, pad_y = box.width * 0.15, box.height * 0.15
+        pad_x, pad_y = box.width * 0.10, box.height * 0.10
         x1 = max(0, int((box.xmin - pad_x) * width))
         y1 = max(0, int((box.ymin - pad_y) * height))
         x2 = min(width, int((box.xmin + box.width + pad_x) * width))
         y2 = min(height, int((box.ymin + box.height + pad_y) * height))
         if x2 - x1 < 48 or y2 - y1 < 48:
             return jsonify({"visible": False, "label": None})
-        label = classify_expression(image[y1:y2, x1:x2])
-        return jsonify({"visible": True, "label": label})
+        expression = classify_expression(image[y1:y2, x1:x2])
+        return jsonify({"visible": True, **expression})
     except Exception:
         app.logger.exception("Facial expression analysis failed")
         return jsonify({"error": "Facial expression analysis unavailable"}), 503
@@ -476,6 +501,15 @@ def live_landmarks():
                         "visibility": visibility, "guidance": guidance,
                         "processing_ms": round((perf_counter() - started) * 1000)})
     try:
+        personal = get_personal_signs().match(points)
+        if personal:
+            score = round(0.82 + 0.16 * (1 - personal["distance"] /
+                                           personal["threshold"]), 4)
+            return jsonify({"visible": True, "suggestions": [{"label": personal["label"],
+                            "score": score, "source": "personal"}], "uncertain": False,
+                            "source": "personal", "frames": len(points),
+                            "visibility": visibility, "guidance": guidance,
+                            "processing_ms": round((perf_counter() - started) * 1000)})
         predictions = get_recognizer().predict(points)
     except Exception:
         app.logger.exception("Landmark recognition failed")
@@ -486,6 +520,30 @@ def live_landmarks():
                     "uncertain": uncertain, "frames": len(points),
                     "visibility": visibility, "guidance": guidance,
                     "processing_ms": round((perf_counter() - started) * 1000)})
+
+
+@app.route("/api/personal-signs", methods=["GET", "POST"])
+def personal_signs_api():
+    library = get_personal_signs()
+    if request.method == "GET":
+        return jsonify({"signs": library.summary(), "required_examples": 3})
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Send a sign label and coordinate frames as JSON"}), 400
+    try:
+        saved = library.add(payload.get("label"), payload.get("frames"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify({"saved": saved, "signs": library.summary()})
+
+
+@app.delete("/api/personal-signs/<path:label>")
+def delete_personal_sign(label):
+    try:
+        get_personal_signs().remove(label)
+    except KeyError:
+        return jsonify({"error": "That saved sign was not found"}), 404
+    return jsonify({"signs": get_personal_signs().summary()})
 
 
 if __name__ == "__main__":

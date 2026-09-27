@@ -46,3 +46,11 @@ test('moderate guesses require three matching windows and different words can fo
   assert.equal(policy.observe(result('B'), 4100), null);
   assert.equal(policy.observe(result('B'), 4400), 'B');
 });
+
+test('a saved coordinate sign can be accepted without an unrelated second suggestion', () => {
+  const policy = new SignStability();
+  const personal = {visible: true, uncertain: false,
+    suggestions: [{label: 'my', score: 0.9, source: 'personal'}]};
+  assert.equal(policy.observe(personal), null);
+  assert.equal(policy.observe(personal), 'my');
+});
