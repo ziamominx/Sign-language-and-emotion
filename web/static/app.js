@@ -11,7 +11,7 @@ canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
 let stream = null, modelReady = false, paused = false, timer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
-let candidate = '', candidateCount = 0, lastAccepted = '', lastAcceptedAt = 0;
+const stability = new SignStability();
 
 function announce(text, error = false) {
   status.textContent = text;
@@ -48,10 +48,7 @@ function speak(text, replace = false) {
 function addWord(label, automatic = false) {
   words.push(label);
   renderWords();
-  lastAccepted = label;
-  lastAcceptedAt = Date.now();
-  candidate = '';
-  candidateCount = 0;
+  stability.markAccepted(label);
   if (automatic && $('#auto-speak').checked) speak(label);
   announce(`${automatic ? 'Recognized' : 'Added'} “${label}”. Keep signing to continue.`);
 }
@@ -81,8 +78,7 @@ function renderSuggestions(items = []) {
 
 function clearRecognition() {
   samples = [];
-  candidate = '';
-  candidateCount = 0;
+  stability.resetCandidate();
   controller?.abort();
   controller = null;
   generation++;
@@ -149,6 +145,7 @@ function stopCamera() {
   if (timer) clearInterval(timer);
   timer = null;
   clearRecognition();
+  stability.rearm();
   stream?.getTracks().forEach(track => track.stop());
   stream = null;
   camera.srcObject = null;
@@ -194,9 +191,7 @@ async function recognizeLive(clip) {
     if (run !== generation) return;
     if (!response.ok) throw new Error(data.error || 'Recognition failed');
     if (!data.visible) {
-      candidate = '';
-      candidateCount = 0;
-      lastAccepted = '';
+      stability.observe(data);
       $('#live-guess').textContent = 'Waiting for a sign';
       $('#live-detail').textContent = 'Keep your upper body and hands in view';
       renderSuggestions();
@@ -207,18 +202,14 @@ async function recognizeLive(clip) {
     $('#live-guess').textContent = first.label;
     $('#live-detail').textContent = `${Math.round(first.score * 100)}% model score · ${data.processing_ms} ms analysis`;
     renderSuggestions(data.suggestions);
+    const accepted = stability.observe(data);
     if (data.uncertain) {
-      candidate = '';
-      candidateCount = 0;
       announce('Unsure of this sign. Try signing clearly or choose a suggestion.');
       return;
     }
-    if (candidate === first.label) candidateCount++;
-    else { candidate = first.label; candidateCount = 1; }
-    const strong = first.score >= 0.75 && first.score - second.score >= 0.25;
-    if ((strong || candidateCount >= 2) && first.label !== lastAccepted && Date.now() - lastAcceptedAt >= 1800) {
-      addWord(first.label, true);
-    } else if (!strong && candidateCount < 2) {
+    if (accepted) {
+      addWord(accepted, true);
+    } else if (stability.candidate && stability.candidate !== stability.lastAccepted) {
       announce('Checking the sign across another moment…');
     }
   } catch (error) {
