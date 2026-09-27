@@ -12,32 +12,24 @@ const canvas = document.createElement('canvas');
 canvas.width = 640;
 canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
-const trackingCanvas = document.createElement('canvas');
-const trackingContext = trackingCanvas.getContext('2d', {alpha: false});
 const poseCanvas = document.createElement('canvas');
 const poseContext = poseCanvas.getContext('2d', {alpha: false});
-const faceCanvas = document.createElement('canvas');
-const faceContext = faceCanvas.getContext('2d', {alpha: false});
 const emotionCanvas = document.createElement('canvas');
 const emotionContext = emotionCanvas.getContext('2d', {alpha: false});
 const overlay = $('#hand-overlay');
 const overlayContext = overlay.getContext('2d');
-let stream = null, modelReady = false, paused = false, timer = null, handTimer = null, faceTimer = null, poseTimer = null;
+let stream = null, modelReady = false, paused = false, timer = null, poseTimer = null, handTimer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
-let tracking = false, trackingController = null, finishHolding = false;
+let nativeTracking = false, nativeTracker = null, finishHolding = false;
 let poseTracking = false, poseController = null, latestPose = null, latestPoseAt = 0, lastWordAnalysisAt = 0;
-let faceTracking = false, faceController = null;
 let recording = null, trainingBusy = false;
-let targetHands = [], displayedHands = [], overlayFrame = null, lastOverlayFrame = 0;
-let targetFace = [], displayedFace = [];
+let targetHands = [], displayedHands = [], targetFace = [], displayedFace = [];
 let emotionReady = false, emotionBusy = false, emotionController = null, lastEmotionAt = 0;
 let emotionLabel = '', emotionScore = 0, emotionTentative = false, emotionVisible = false;
 const stability = new SignStability();
 const letterStability = new LetterStability();
 const finishGesture = new FinishGesture();
-const HAND_BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
-  [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
-  [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+const HAND_BONES = window.HAND_CONNECTIONS;
 const FACE_PATHS = [
   [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10],
   [33,160,158,133,153,144,33], [362,385,387,263,373,380,362],
@@ -55,16 +47,16 @@ function fitOverlay() {
   overlay.style.top = `${rect.top}px`;
   overlay.style.width = `${rect.width}px`;
   overlay.style.height = `${rect.height}px`;
-  overlay.width = trackingCanvas.width;
-  overlay.height = trackingCanvas.height;
+  overlay.width = nativeTracker?.frame?.width || 640;
+  overlay.height = nativeTracker?.frame?.height || 480;
 }
 
 function renderHandOverlay(now) {
   if (!stream) return;
   const dt = lastOverlayFrame ? Math.min(100, now - lastOverlayFrame) : 16;
   lastOverlayFrame = now;
-  const handFraction = 1 - Math.exp(-dt / 25);
-  const faceFraction = 1 - Math.exp(-dt / 8);
+  const handFraction = 1 - Math.exp(-dt / 14);
+  const faceFraction = 1 - Math.exp(-dt / 6);
   displayedHands = easeHands(displayedHands, targetHands, handFraction);
   displayedFace = targetFace.length ? easeHands(
     displayedFace.length ? [displayedFace] : [], [targetFace], faceFraction)[0] : [];
@@ -95,7 +87,7 @@ function renderHandOverlay(now) {
     const y2 = Math.min(overlay.height, Math.max(...ys) * overlay.height + 6);
     overlayContext.strokeStyle = 'rgba(240,248,232,.55)';
     overlayContext.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    if (emotionVisible && $('#show-emotion').checked && emotionLabel) {
+    if (emotionVisible && $('#show-emotion').checked && emotionLabel && displayedFace.length > 400) {
       // Compact expression tag above the head, in the style of the older
       // desktop app — no large panel on the side.
       const caption = emotionTentative ? `${emotionLabel}?` : emotionLabel;
@@ -142,6 +134,90 @@ function resetHandOverlay() {
   targetFace = [];
   displayedFace = [];
   overlayContext.clearRect(0, 0, overlay.width, overlay.height);
+}
+
+/* The old /api/track returned display-space hands plus model-space hands and
+ * the finish gesture. The native tracker produces the same shapes locally. */
+function onNativeHands(hands, handResult) {
+  if (!stream || paused) return;
+  targetHands = [...hands].sort((a, b) => a[0][0] - b[0][0]);
+  const emptyHand = () => Array.from({length: 21}, () => [0, 0]);
+  const classifications = handResult?.handedness || [];
+  const modelHands = {left: null, right: null};
+  hands.forEach((hand, index) => {
+    const label = classifications[index]?.[0]?.categoryName;
+    if (label === 'Left') modelHands.right = hand.map(point => [point[0], point[1]]);
+    if (label === 'Right') modelHands.left = hand.map(point => [point[0], point[1]]);
+  });
+  if (recognitionMode === 'words' && latestPose && Date.now() - latestPoseAt < 250) {
+    const mapped = points => letterboxLandmarks(points, camera.videoWidth, camera.videoHeight);
+    const points = [...(latestPose.some(([x, y]) => x !== 0 || y !== 0)
+      ? mapped(latestPose) : latestPose),
+      ...(modelHands.left ? mapped(modelHands.left) : emptyHand()),
+      ...(modelHands.right ? mapped(modelHands.right) : emptyHand())];
+    if (points.length === 75) ingestWordPoints(points);
+  }
+  const finishOpen = hands.length === 2 && hands.every(hand => openPalmScore(hand) === 1);
+  observeFinishGesture(finishOpen);
+}
+
+function onNativeFace(face) {
+  if (!stream || paused) return;
+  targetFace = face;
+}
+
+function ingestWordPoints(points) {
+  const now = Date.now();
+  if (recording) {
+    if (now >= recording.readyAt) {
+      recording.frames.push(points);
+      $('#record-count').textContent = `${recording.frames.length}/18 frames`;
+      if (recording.frames.length === 18) {
+        const completed = recording;
+        recording = null;
+        $('#record-progress').hidden = true;
+        samples = [];
+        saveRecording(completed);
+      }
+    }
+    return;
+  }
+  if (trainingBusy) return;
+  samples.push(points);
+  if (samples.length > 18) samples.shift();
+  if (samples.length === 18 && !analyzing && !finishHolding &&
+      now - lastWordAnalysisAt >= 280) {
+    lastWordAnalysisAt = now;
+    recognizeLive([...samples]);
+  }
+}
+
+function observeFinishGesture(finishOpen) {
+  if (recording || trainingBusy) {
+    finishHolding = false;
+    finishGesture.reset();
+    $('#finish-indicator').hidden = true;
+    return;
+  }
+  const hasMessage = Boolean(messageText());
+  const wasFinishing = finishHolding;
+  finishHolding = Boolean(finishOpen && hasMessage);
+  if (finishHolding && !wasFinishing) {
+    controller?.abort();
+    controller = null;
+    analyzing = false;
+  }
+  const result = finishGesture.observe(finishHolding, hasMessage);
+  $('#finish-indicator').hidden = !finishHolding;
+  $('#finish-progress').textContent = `${Math.round(result.progress * 100)}%`;
+  if (finishHolding) {
+    samples = [];
+    stability.resetCandidate();
+    letterStability.resetCandidate();
+    $('#live-guess').textContent = result.finished ? 'Message complete' : 'Finishing message';
+    $('#live-detail').textContent = 'Hold both hands open to speak';
+    if (result.finished) showSentence();
+  }
 }
 
 function showSentence() {
@@ -257,20 +333,14 @@ function clearRecognition() {
   stability.resetCandidate();
   letterStability.resetCandidate();
   controller?.abort();
-  trackingController?.abort();
   poseController?.abort();
-  faceController?.abort();
   emotionController?.abort();
   emotionVisible = false;
   $('#emotion-live').textContent = '';
   emotionController = null;
   emotionBusy = false;
-  trackingController = null;
-  tracking = false;
   poseController = null;
   poseTracking = false;
-  faceController = null;
-  faceTracking = false;
   finishHolding = false;
   finishGesture.reset();
   $('#finish-indicator').hidden = true;
@@ -517,17 +587,14 @@ async function startCamera() {
     stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 1280}, height: {ideal: 720}, aspectRatio: {ideal: 16 / 9}, frameRate: {ideal: 30}, facingMode: 'user'}});
     camera.srcObject = stream;
     await camera.play();
-    trackingCanvas.width = Math.max(480, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
-    trackingCanvas.height = Math.round(trackingCanvas.width * camera.videoHeight / camera.videoWidth);
-    poseCanvas.width = trackingCanvas.width;
-    poseCanvas.height = trackingCanvas.height;
-    faceCanvas.width = Math.max(720, Math.ceil(120 * camera.videoWidth / camera.videoHeight));
-    faceCanvas.height = Math.round(faceCanvas.width * camera.videoHeight / camera.videoWidth);
+    poseCanvas.width = 480;
+    poseCanvas.height = Math.round(480 * camera.videoHeight / camera.videoWidth);
     emotionCanvas.width = 960;
     emotionCanvas.height = Math.round(960 * camera.videoHeight / camera.videoWidth);
     fitOverlay();
     lastOverlayFrame = 0;
     overlayFrame = requestAnimationFrame(renderHandOverlay);
+    startNativeTracking();
     stream.getVideoTracks()[0].addEventListener('ended', stopCamera, {once: true});
     $('#camera-placeholder').hidden = true;
     paused = false;
@@ -538,9 +605,7 @@ async function startCamera() {
       ? 'Live fingerspelling started. Show one hand in the camera area.'
       : 'Live translation started. Sign in the camera area.');
     timer = setInterval(sampleFrame, 110);
-    handTimer = setInterval(trackHands, 60);
     poseTimer = setInterval(trackPose, 100);
-    faceTimer = setInterval(trackFace, 50);
   } catch (error) {
     stream?.getTracks().forEach(track => track.stop());
     stream = null;
@@ -552,13 +617,10 @@ async function startCamera() {
 
 function stopCamera() {
   if (timer) clearInterval(timer);
-  if (handTimer) clearInterval(handTimer);
   if (poseTimer) clearInterval(poseTimer);
-  if (faceTimer) clearInterval(faceTimer);
   timer = null;
-  handTimer = null;
   poseTimer = null;
-  faceTimer = null;
+  stopNativeTracking();
   clearRecognition();
   if (overlayFrame !== null) cancelAnimationFrame(overlayFrame);
   overlayFrame = null;
@@ -581,11 +643,6 @@ async function sampleFrame() {
   if (!stream || paused || sampling || camera.readyState < 2) return;
   sampling = true;
   try {
-    if (emotionReady && $('#show-emotion').checked && !emotionBusy &&
-        Date.now() - lastEmotionAt >= 1200) {
-      lastEmotionAt = Date.now();
-      recognizeEmotion();
-    }
     if (recognitionMode === 'words') return;
     const scale = Math.min(canvas.width / camera.videoWidth, canvas.height / camera.videoHeight);
     const width = camera.videoWidth * scale, height = camera.videoHeight * scale;
@@ -602,26 +659,54 @@ async function sampleFrame() {
   }
 }
 
-async function trackHands() {
-  if (!stream || paused || tracking || camera.readyState < 2) return;
-  tracking = true;
+let legacyTracking = false, legacyCanvas = null;
+let lastPoseAt = 0;
+
+async function startNativeTracking() {
+  if (nativeTracker) { stopNativeTracking(); }
+  nativeTracker = new NativeTracker({video: camera, onHands: onNativeHands, onFace: onNativeFace});
+  nativeTracking = true;
+  try {
+    await nativeTracker.start();
+    fitOverlay();
+  } catch (error) {
+    console.error('Native tracking failed to start:', error);
+    announce('Smooth hand overlay unavailable; falling back to server tracking.', true);
+    nativeTracking = false;
+    handTimer = setInterval(legacyTrackHands, 70);
+  }
+}
+
+function stopNativeTracking() {
+  nativeTracking = false;
+  if (handTimer) { clearInterval(handTimer); handTimer = null; }
+  nativeTracker?.stop();
+  nativeTracker = null;
+}
+
+/* Server-side fallback used only when the WASM tracker cannot start. */
+async function legacyTrackHands() {
+  if (!stream || paused || legacyTracking || camera.readyState < 2) return;
+  legacyTracking = true;
   const run = generation;
-  trackingContext.drawImage(camera, 0, 0, trackingCanvas.width, trackingCanvas.height);
-  const blob = await new Promise(resolve => trackingCanvas.toBlob(resolve, 'image/jpeg', 0.7));
+  const legacyCanvas = legacyCanvas || document.createElement('canvas');
+  legacyCanvas.width = 480;
+  legacyCanvas.height = Math.round(480 * camera.videoHeight / camera.videoWidth);
+  const legacyContext = legacyCanvas.getContext('2d', {alpha: false});
+  legacyContext.drawImage(camera, 0, 0, legacyCanvas.width, legacyCanvas.height);
+  const blob = await new Promise(resolve => legacyCanvas.toBlob(resolve, 'image/jpeg', 0.7));
   if (!blob || run !== generation || !stream || paused) {
-    tracking = false;
+    legacyTracking = false;
     return;
   }
   const form = new FormData();
   form.append('frame', blob, 'hands.jpg');
-  trackingController = new AbortController();
   try {
-    const response = await fetch('/api/track', {method: 'POST', body: form, signal: trackingController.signal});
+    const response = await fetch('/api/track', {method: 'POST', body: form});
     if (!response.ok) return;
     const data = await response.json();
     if (run !== generation || !stream || paused) return;
     targetHands = (data.hands || []).sort((a, b) => a[0][0] - b[0][0]);
-    const recordingThisFrame = Boolean(recording);
     if (recognitionMode === 'words' && latestPose && Date.now() - latestPoseAt < 250) {
       const emptyHand = () => Array.from({length: 21}, () => [0, 0]);
       const mapped = points => letterboxLandmarks(points, camera.videoWidth, camera.videoHeight);
@@ -629,73 +714,18 @@ async function trackHands() {
         ? mapped(latestPose) : latestPose),
         ...(data.model_hands?.left ? mapped(data.model_hands.left) : emptyHand()),
         ...(data.model_hands?.right ? mapped(data.model_hands.right) : emptyHand())];
-      if (points.length === 75) {
-        const now = Date.now();
-        if (recording) {
-          if (now >= recording.readyAt) {
-            recording.frames.push(points);
-            $('#record-count').textContent = `${recording.frames.length}/18 frames`;
-            if (recording.frames.length === 18) {
-              const completed = recording;
-              recording = null;
-              $('#record-progress').hidden = true;
-              samples = [];
-              saveRecording(completed);
-            }
-          }
-        } else if (!trainingBusy) {
-          samples.push(points);
-          if (samples.length > 18) samples.shift();
-          if (samples.length === 18 && !analyzing && !finishHolding &&
-              now - lastWordAnalysisAt >= 280) {
-            lastWordAnalysisAt = now;
-            recognizeLive([...samples]);
-          }
-        }
-      }
+      if (points.length === 75) ingestWordPoints(points);
     }
-    if (recordingThisFrame || trainingBusy) {
-      finishHolding = false;
-      finishGesture.reset();
-      $('#finish-indicator').hidden = true;
-      return;
-    }
-    const hasMessage = Boolean(messageText());
-    const wasFinishing = finishHolding;
-    finishHolding = Boolean(data.finish_gesture && hasMessage);
-    if (finishHolding && !wasFinishing) {
-      controller?.abort();
-      controller = null;
-      analyzing = false;
-    }
-    const result = finishGesture.observe(finishHolding, hasMessage);
-    $('#finish-indicator').hidden = !finishHolding;
-    $('#finish-progress').textContent = `${Math.round(result.progress * 100)}%`;
-    if (finishHolding) {
-      samples = [];
-      stability.resetCandidate();
-      letterStability.resetCandidate();
-      $('#live-guess').textContent = result.finished ? 'Message complete' : 'Finishing message';
-      $('#live-detail').textContent = 'Hold both hands open to speak';
-      if (result.finished) showSentence();
-    }
-  } catch (error) {
-    if (error.name !== 'AbortError' && run === generation) {
-      resetHandOverlay();
-      finishHolding = false;
-      finishGesture.reset();
-      $('#finish-indicator').hidden = true;
-    }
+    observeFinishGesture(Boolean(data.finish_gesture));
+  } catch {
+    if (run === generation) resetHandOverlay();
   } finally {
-    if (run === generation) {
-      tracking = false;
-      trackingController = null;
-    }
+    if (run === generation) legacyTracking = false;
   }
 }
 
 async function trackPose() {
-  if (!stream || paused || poseTracking || recognitionMode !== 'words' || camera.readyState < 2) return;
+  if (!stream || paused || poseTracking || camera.readyState < 2) return;
   poseTracking = true;
   const run = generation;
   poseContext.drawImage(camera, 0, 0, poseCanvas.width, poseCanvas.height);
@@ -721,36 +751,6 @@ async function trackPose() {
     if (run === generation) {
       poseTracking = false;
       poseController = null;
-    }
-  }
-}
-
-async function trackFace() {
-  if (!stream || paused || faceTracking || camera.readyState < 2) return;
-  faceTracking = true;
-  const run = generation;
-  faceContext.drawImage(camera, 0, 0, faceCanvas.width, faceCanvas.height);
-  const blob = await new Promise(resolve => faceCanvas.toBlob(resolve, 'image/jpeg', 0.65));
-  if (!blob || run !== generation || !stream || paused) {
-    faceTracking = false;
-    return;
-  }
-  const form = new FormData();
-  form.append('frame', blob, 'face-landmarks.jpg');
-  faceController = new AbortController();
-  try {
-    const response = await fetch('/api/face-track', {method: 'POST', body: form,
-      signal: faceController.signal});
-    if (!response.ok) return;
-    const data = await response.json();
-    if (run !== generation || !stream || paused) return;
-    targetFace = data.face || [];
-  } catch (error) {
-    if (error.name !== 'AbortError' && run === generation) targetFace = [];
-  } finally {
-    if (run === generation) {
-      faceTracking = false;
-      faceController = null;
     }
   }
 }
