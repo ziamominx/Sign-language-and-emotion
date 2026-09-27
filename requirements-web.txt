@@ -1,0 +1,7 @@
+flask>=3,<4
+mediapipe==0.10.14
+opencv-python>=4.9,<5
+numpy<2
+requests>=2.31,<3
+safetensors>=0.4,<1
+torch==2.5.1

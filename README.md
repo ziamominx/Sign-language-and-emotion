@@ -1,39 +1,26 @@
-# Zia's Glasses
+# Zia's Glasses — ASL to voice
 
-A Windows webcam prototype for recording and recognizing **isolated ASL signs** from hand landmarks, speaking recognized glosses, and optionally showing facial emotion analysis. It is not a complete ASL interpreter. There is no bundled trained vocabulary, and a gloss is not the same as an ASL sentence.
+A local website that uses a pretrained model to suggest words from a **2,000 word isolated ASL vocabulary**. No sign recording or training is required. Review a suggestion, add it to a message, and use browser speech output. The earlier Windows webcam prototype remains in `zias_glasses.py` for reference; the website is the primary interface.
 
-## What changed
+## Run the website
 
-The earlier version mapped finger-up patterns to words such as `HELP` and `WAR`. Those patterns were not validated ASL signs, and nearest-pattern guessing could produce a word for an unknown gesture. The app now compares the **full movement of one or two hands** with examples that you record. It checks a short sequence while you sign and returns a label only when at least three examples exist and repeated matches pass distance and ambiguity checks. Lowering your hands lets you start the next sign. Unknown signs remain unknown. Examples are stored locally under `sign_examples/`; that directory is excluded from Git because recordings may be personal.
-
-The matcher uses MediaPipe's 21 landmarks per hand and normalizes for hand position and size. It does **not** yet model facial grammar, upper-body posture, continuous signing, or signer-independent variations. Its thresholds are conservative starting values, not measured accuracy guarantees. To evaluate reliability, collect examples from multiple signers and hold out test recordings for each label before using it for communication decisions.
-
-## Setup (Windows)
-
-1. Install Python 3.10 and connect a webcam.
-2. Install dependencies: `py -3.10 -m pip install -r requirements.txt`.
-3. Optional emotion overlay: `py -3.10 -m pip install deepface`. If DeepFace is unavailable, the overlay says so rather than inventing scores.
-4. Optional English sentence rewriting: set `ANTHROPIC_API_KEY`. Without it, speech uses the recognized glosses in order. This option sends gloss text to the API; webcam frames and recorded examples stay local.
-
-The program can also install missing core packages on first run. Explicit installation is recommended so errors are visible.
-
-## Build a vocabulary
-
-In the webcam app, press **R**, type a verified ASL sign label such as `HELLO`, and press **Enter**. Make the isolated sign, then lower both hands to save that example. Repeat five times. Recognition becomes available immediately after training; you do not need to restart the app. Press **Esc** during teaching to cancel.
-
-You can also record examples with the separate tool. Record an ASL sign verified with a fluent signer or reliable ASL reference:
+On Windows, install Python 3.10, then:
 
 ```powershell
-py -3.10 record_sign.py HELLO --count 5
-py -3.10 record_sign.py HELP --count 5
+py -3.10 -m pip install -r requirements-web.txt
+py -3.10 server.py
 ```
 
-In the recording window, make one isolated sign, then lower both hands. Repeat until five examples are saved. Use consistent camera framing and lighting, but vary speed and position naturally. Record at least three examples for every label; five or more are recommended. Collect examples from the intended users. Use a different sign language only with examples from that language and a separate vocabulary directory.
+Open **http://127.0.0.1:8000** in a browser. You can also run `run_web.bat`. On first launch, the server downloads the 15 MB [SignBart WLASL-2000 checkpoint](https://huggingface.co/tinh2312/SignBart-WLASL-2000) and its label list to `.models/`. The model is checked against pinned SHA-256 hashes and cached for later launches. PyTorch is a separate, larger install. Internet is only needed for installation and the initial model download; camera frames go to the local server at `127.0.0.1`.
 
-Run `py -3.10 zias_glasses.py` (or `run.bat`). Make a sign and watch for recognition while your hands are visible. Lower your hands between signs to reset, then repeat. Press **R** to teach a sign, **Enter** to speak the current gloss sequence, **C** or the Clear button to reset, and **Q/Esc** to quit. The app also speaks each recognized word. If it prints `[UNKNOWN]`, record better examples or adjust framing; it will not guess a word.
+Click **Enable camera**, frame your head, shoulders, and hands, then **Capture one sign**. Perform one isolated ASL sign during the 2.5 second capture. Choose the intended word from the three suggestions, capture more signs, and click **Speak message**. Use **Undo last** or **Clear** to correct the message. The server needs to stay running while the page is open.
 
-## Scope and next steps
+## Scope and accuracy
 
-ASL uses movements of the hands and face and has grammar distinct from English. No finite finger-pattern table can cover all ASL. Expanding toward broad communication needs a verified ASL corpus, a model trained on sign videos, signer-independent evaluation, nonmanual features, and continuous-sign segmentation. The [WLASL project](https://github.com/dxli94/WLASL) provides a research dataset with 2,000 word classes and pretrained-model resources, subject to its data agreement. A future model should be evaluated on people absent from training before it replaces the local-example recognizer.
+This is a research prototype, not a complete or certified ASL interpreter. The [SignBart project](https://github.com/TinhNguyen2312/SignBart) reports **68% accuracy on its WLASL-2000 evaluation split**; that result is not a guarantee for a live webcam or an individual signer. The model only classifies short isolated clips among its 2,000 labels. It cannot understand continuous ASL, facial grammar, signs outside the vocabulary, or translate full ASL sentences into English. The displayed percentages are model scores, not verified probabilities of correctness. The site asks you to choose the word before speaking it to reduce harmful miscommunication.
 
-Run core tests with `py -3.10 -m unittest -v test_sign_recognition.py`. Webcam capture, speech, and model accuracy require checks on the target computer with real signers.
+The [National Institute on Deafness and Other Communication Disorders](https://www.nidcd.nih.gov/health/american-sign-language) describes ASL as a complete language expressed through movements of the hands and face, with grammar distinct from English. The message builder preserves selected words in order; it does not claim to translate ASL grammar.
+
+## Development checks
+
+Run `py -3.10 -m unittest -v test_sign_recognition.py test_asl_model.py` for the recognizer and model adapter checks. For a live check, open the site, grant camera access, capture a known sign, and review the suggestions. Camera and speech access depend on the browser and target device.
