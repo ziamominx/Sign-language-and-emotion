@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   <script src="{{ url_for('static', filename='sign_stability.js') }}" defer></script>
   <script src="{{ url_for('static', filename='letter_stability.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='finish_gesture.js') }}" defer></script>
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
@@ -33,18 +34,21 @@
           <div class="mode-switch" role="group" aria-label="Recognition mode"><button id="mode-words" class="mode-button selected" type="button" aria-pressed="true">ASL words</button><button id="mode-letters" class="mode-button" type="button" aria-pressed="false" disabled>Fingerspell · experimental</button></div>
           <div class="camera-frame" id="camera-frame">
             <video id="camera" autoplay muted playsinline aria-label="Camera preview"></video>
+            <canvas id="hand-overlay" class="hand-overlay" width="640" height="480" aria-hidden="true"></canvas>
             <div class="camera-placeholder" id="camera-placeholder" aria-hidden="true"><div class="placeholder-glyph">✳</div><p>Camera preview appears here</p></div>
             <div class="frame-corner corner-tl"></div><div class="frame-corner corner-tr"></div><div class="frame-corner corner-bl"></div><div class="frame-corner corner-br"></div>
             <div class="live-result" aria-live="off"><span>LIVE RECOGNITION</span><strong id="live-guess">Camera off</strong><small id="live-detail">Start live translation</small></div>
+            <div id="finish-indicator" class="finish-indicator" hidden>Hold both hands open to speak message <strong id="finish-progress">0%</strong></div>
           </div>
           <div class="camera-actions"><button class="button button-primary" id="camera-button" type="button" disabled>Start live translation</button><button class="button button-light" id="capture-button" type="button" disabled>Pause translation</button></div>
           <p class="camera-hint"><span id="framing-hint">Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.</span> <label class="speech-toggle"><input id="auto-speak" type="checkbox" checked> Speak recognized words aloud</label></p>
-          <p id="mode-hint" class="mode-hint">ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat the same word.</p>
+          <p id="mode-hint" class="mode-hint">ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat a word. Hold both hands open for 1.5 seconds to speak the full message.</p>
         </section>
 
         <section class="response-panel" aria-labelledby="response-title">
           <div class="panel-heading"><div><p class="eyebrow">OUTPUT / VOICE</p><h2 id="response-title">Your message</h2></div><span class="panel-number">02</span></div>
           <div class="message-area"><p class="field-label">RECOGNIZED WORDS</p><div id="message" class="message-words" aria-live="polite"><span class="message-empty">Your words will appear here.</span></div></div>
+          <div id="sentence-area" class="sentence-area" hidden><p class="field-label">SPOKEN MESSAGE</p><p id="sentence-output"></p></div>
           <div id="letter-controls" class="letter-controls" hidden><button id="letter-space" class="text-button" type="button">Finish spelled word</button><button id="letter-delete" class="text-button" type="button">Delete letter</button></div>
           <div class="suggestion-area"><div class="suggestion-head"><p class="field-label">LIVE CANDIDATES</p><span>Tap to correct or add manually</span></div><div id="suggestions" class="suggestions" role="status" aria-live="polite"><p class="suggestions-empty">Live suggestions appear while you sign.</p></div></div>
           <div class="message-actions"><button class="button button-voice" id="speak-button" type="button" disabled>Speak message <span aria-hidden="true">↗</span></button><button class="text-button" id="undo-button" type="button" disabled>Undo last</button><button class="text-button" id="clear-button" type="button" disabled>Clear</button></div>
@@ -52,7 +56,7 @@
       </div>
 
       <p id="status-message" class="status-message" role="status" aria-live="polite">Loading the ASL model…</p>
-      <section class="model-note" aria-labelledby="model-note-title"><span class="note-symbol" aria-hidden="true">i</span><div><h2 id="model-note-title">About live recognition</h2><p>ASL words uses an isolated 2,000-word research vocabulary. Optional fingerspelling uses a separate local alphabet model and is experimental; J and Z involve movement and are not added automatically. Neither mode translates continuous ASL grammar or every sign. Review the message before using it for important communication.</p></div></section>
+      <section class="model-note" aria-labelledby="model-note-title"><span class="note-symbol" aria-hidden="true">i</span><div><h2 id="model-note-title">About live recognition</h2><p>Hand landmarks show tracking feedback. Hold both open hands for 1.5 seconds to speak the collected words as a sentence; the gesture does not add a new word. ASL words uses an isolated 2,000-word research vocabulary. Optional fingerspelling is experimental; J and Z involve movement and are not added automatically. Neither mode translates continuous ASL grammar or every sign. Review the message before using it for important communication.</p></div></section>
     </main>
     <footer><span>ZIA'S GLASSES / ASL TO VOICE</span><span>Built for clearer conversations.</span></footer>
   </div>

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from contextlib import ExitStack
-from threading import Lock
+from threading import Lock, RLock
 from time import perf_counter
 
 import cv2
@@ -22,6 +22,31 @@ recognizer = None
 recognizer_lock = Lock()
 alphabet_recognizer = None
 alphabet_recognizer_lock = Lock()
+tracker = None
+tracker_lock = RLock()
+
+
+def get_tracker():
+    """Keep a lightweight hand tracker warm for responsive camera feedback."""
+    global tracker
+    if tracker is None:
+        with tracker_lock:
+            if tracker is None:
+                tracker = mp.solutions.hands.Hands(
+                    static_image_mode=False, max_num_hands=2, model_complexity=0,
+                    min_detection_confidence=0.55, min_tracking_confidence=0.5)
+    return tracker
+
+
+def _open_palm(landmarks):
+    """Require four extended fingers, regardless of hand rotation or mirror."""
+    wrist = np.array([landmarks[0].x, landmarks[0].y])
+    extended = 0
+    for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18)):
+        tip_distance = np.linalg.norm(np.array([landmarks[tip].x, landmarks[tip].y]) - wrist)
+        pip_distance = np.linalg.norm(np.array([landmarks[pip].x, landmarks[pip].y]) - wrist)
+        extended += tip_distance > pip_distance * 1.18
+    return extended == 4
 
 
 def get_recognizer():
@@ -152,6 +177,33 @@ def alphabet_status():
         app.logger.exception("Alphabet model unavailable")
         return jsonify({"ready": False, "experimental": True,
                         "error": "Alphabet model could not be loaded"}), 503
+
+
+@app.post("/api/track")
+def track_hands():
+    """Return hand landmarks for the live overlay and the finish gesture."""
+    upload = request.files.get("frame")
+    if upload is None:
+        return jsonify({"error": "Send one JPEG camera frame in the frame field"}), 400
+    data = upload.read()
+    if not data.startswith(b"\xff\xd8"):
+        return jsonify({"error": "The camera frame must be a JPEG image"}), 422
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or min(image.shape[:2]) < 120:
+        return jsonify({"error": "The camera frame could not be read"}), 422
+    try:
+        with tracker_lock:
+            result = get_tracker().process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        landmarks = result.multi_hand_landmarks or []
+        return jsonify({
+            "hands": [[[round(point.x, 4), round(point.y, 4)] for point in hand.landmark]
+                      for hand in landmarks],
+            "finish_gesture": len(landmarks) == 2 and all(
+                _open_palm(hand.landmark) for hand in landmarks),
+        })
+    except Exception:
+        app.logger.exception("Hand tracking failed")
+        return jsonify({"error": "Hand tracking failed"}), 500
 
 
 @app.post("/api/alphabet/predict")

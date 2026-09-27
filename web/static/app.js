@@ -12,10 +12,48 @@ const canvas = document.createElement('canvas');
 canvas.width = 640;
 canvas.height = 480;
 const context = canvas.getContext('2d', {alpha: false});
+const overlay = $('#hand-overlay');
+const overlayContext = overlay.getContext('2d');
 let stream = null, modelReady = false, paused = false, timer = null;
 let samples = [], sampling = false, analyzing = false, controller = null, generation = 0;
+let tracking = false, trackingController = null, lastTrackedAt = 0, finishHolding = false;
 const stability = new SignStability();
 const letterStability = new LetterStability();
+const finishGesture = new FinishGesture();
+const HAND_BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],
+  [13,17],[0,17],[17,18],[18,19],[19,20]];
+
+function drawHands(hands = []) {
+  overlayContext.clearRect(0, 0, overlay.width, overlay.height);
+  overlayContext.lineWidth = 2.5;
+  overlayContext.strokeStyle = '#d6ed76';
+  overlayContext.fillStyle = '#f2f9d2';
+  for (const hand of hands) {
+    if (hand.length !== 21) continue;
+    for (const [a, b] of HAND_BONES) {
+      overlayContext.beginPath();
+      overlayContext.moveTo(hand[a][0] * overlay.width, hand[a][1] * overlay.height);
+      overlayContext.lineTo(hand[b][0] * overlay.width, hand[b][1] * overlay.height);
+      overlayContext.stroke();
+    }
+    hand.forEach(([x, y], index) => {
+      overlayContext.beginPath();
+      overlayContext.arc(x * overlay.width, y * overlay.height,
+        [4,8,12,16,20].includes(index) ? 4 : 2.7, 0, Math.PI * 2);
+      overlayContext.fill();
+    });
+  }
+}
+
+function showSentence() {
+  const text = messageText().trim();
+  if (!text) return;
+  const sentence = text[0].toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? '' : '.');
+  $('#sentence-output').textContent = sentence;
+  $('#sentence-area').hidden = false;
+  announce(speak(sentence, true) ? 'Speaking your complete message.' : 'Sentence ready. Speech is unavailable in this browser.');
+}
 
 function announce(text, error = false) {
   status.textContent = text;
@@ -23,6 +61,7 @@ function announce(text, error = false) {
 }
 
 function renderWords() {
+  $('#sentence-area').hidden = true;
   $('#message').replaceChildren();
   if (!words.length && !spelled) {
     const empty = document.createElement('span');
@@ -113,6 +152,13 @@ function clearRecognition() {
   stability.resetCandidate();
   letterStability.resetCandidate();
   controller?.abort();
+  trackingController?.abort();
+  trackingController = null;
+  tracking = false;
+  finishHolding = false;
+  finishGesture.reset();
+  $('#finish-indicator').hidden = true;
+  drawHands();
   controller = null;
   generation++;
   analyzing = false;
@@ -144,8 +190,8 @@ function setMode(next) {
     ? 'Show one hand clearly in the center of the camera. Hold each letter, then lower your hand before the next.'
     : 'Keep your upper body and hands visible. Sign one word at a time and pause briefly between signs.';
   $('#mode-hint').textContent = next === 'letters'
-    ? 'Experimental fingerspelling: hold one letter until it appears, then lower your hand before the next. J and Z need motion and are not added automatically.'
-    : 'ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat the same word.';
+    ? 'Experimental fingerspelling: hold one letter until it appears, then lower your hand before the next. Hold both hands open to speak the full message. J and Z need motion and are not added automatically.'
+    : 'ASL words uses the pretrained 2,000-word model. Lower your hands briefly to repeat a word. Hold both hands open for 1.5 seconds to speak the full message.';
   $('#live-guess').textContent = stream ? 'Watching for a sign' : 'Camera off';
   $('#live-detail').textContent = next === 'letters' ? 'Show one hand to spell a letter' : 'Sign one word at a time';
   renderSuggestions();
@@ -190,7 +236,7 @@ async function startCamera() {
   startButton.disabled = true;
   announce('Requesting camera access…');
   try {
-    stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 960}, height: {ideal: 720}, facingMode: 'user'}});
+    stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {width: {ideal: 960}, height: {ideal: 720}, aspectRatio: {ideal: 4 / 3}, facingMode: 'user'}});
     camera.srcObject = stream;
     await camera.play();
     stream.getVideoTracks()[0].addEventListener('ended', stopCamera, {once: true});
@@ -241,9 +287,13 @@ async function sampleFrame() {
     context.drawImage(camera, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.65));
     if (!blob || !stream || paused) return;
+    if (!tracking && Date.now() - lastTrackedAt >= 180) {
+      lastTrackedAt = Date.now();
+      trackHands(blob);
+    }
     samples.push(blob);
     if (samples.length > 16) samples.shift();
-    if (!analyzing) {
+    if (!analyzing && !finishHolding) {
       if (recognitionMode === 'letters') recognizeLetter(blob);
       else if (samples.length === 16) recognizeLive([...samples]);
     }
@@ -251,6 +301,52 @@ async function sampleFrame() {
     announce(`Could not read camera: ${error.message}`, true);
   } finally {
     sampling = false;
+  }
+}
+
+async function trackHands(blob) {
+  tracking = true;
+  const run = generation;
+  const form = new FormData();
+  form.append('frame', blob, 'hands.jpg');
+  trackingController = new AbortController();
+  try {
+    const response = await fetch('/api/track', {method: 'POST', body: form, signal: trackingController.signal});
+    if (!response.ok) return;
+    const data = await response.json();
+    if (run !== generation || !stream || paused) return;
+    drawHands(data.hands);
+    const hasMessage = Boolean(messageText());
+    const wasFinishing = finishHolding;
+    finishHolding = Boolean(data.finish_gesture && hasMessage);
+    if (finishHolding && !wasFinishing) {
+      controller?.abort();
+      controller = null;
+      analyzing = false;
+    }
+    const result = finishGesture.observe(finishHolding, hasMessage);
+    $('#finish-indicator').hidden = !finishHolding;
+    $('#finish-progress').textContent = `${Math.round(result.progress * 100)}%`;
+    if (finishHolding) {
+      samples = [];
+      stability.resetCandidate();
+      letterStability.resetCandidate();
+      $('#live-guess').textContent = result.finished ? 'Message complete' : 'Finishing message';
+      $('#live-detail').textContent = 'Hold both hands open to speak';
+      if (result.finished) showSentence();
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError' && run === generation) {
+      drawHands();
+      finishHolding = false;
+      finishGesture.reset();
+      $('#finish-indicator').hidden = true;
+    }
+  } finally {
+    if (run === generation) {
+      tracking = false;
+      trackingController = null;
+    }
   }
 }
 
@@ -282,6 +378,7 @@ async function recognizeLive(clip) {
       announce('Unsure of this sign. Try signing clearly or choose a suggestion.');
       return;
     }
+    if (finishHolding) return;
     if (accepted) {
       addWord(accepted, true);
     } else if (stability.candidate && stability.candidate !== stability.lastAccepted) {
@@ -308,6 +405,7 @@ async function recognizeLetter(blob) {
     const data = await response.json();
     if (run !== generation) return;
     if (!response.ok) throw new Error(data.error || 'Fingerspelling recognition failed');
+    if (finishHolding) return;
     const accepted = letterStability.observe(data);
     if (!data.visible) {
       $('#live-guess').textContent = 'Waiting for a hand';
