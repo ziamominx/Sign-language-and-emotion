@@ -58,10 +58,11 @@ function renderHandOverlay(now) {
   if (!stream) return;
   const dt = lastOverlayFrame ? Math.min(100, now - lastOverlayFrame) : 16;
   lastOverlayFrame = now;
-  const fraction = 1 - Math.exp(-dt / 25);
-  displayedHands = easeHands(displayedHands, targetHands, fraction);
+  const handFraction = 1 - Math.exp(-dt / 25);
+  const faceFraction = 1 - Math.exp(-dt / 8);
+  displayedHands = easeHands(displayedHands, targetHands, handFraction);
   displayedFace = targetFace.length ? easeHands(
-    displayedFace.length ? [displayedFace] : [], [targetFace], fraction)[0] : [];
+    displayedFace.length ? [displayedFace] : [], [targetFace], faceFraction)[0] : [];
   overlayContext.clearRect(0, 0, overlay.width, overlay.height);
   if (displayedFace.length) {
     overlayContext.strokeStyle = 'rgba(225,240,220,.8)';
@@ -356,7 +357,7 @@ async function startCamera() {
       : 'Live translation started. Sign in the camera area.');
     timer = setInterval(sampleFrame, 110);
     handTimer = setInterval(trackHands, 60);
-    faceTimer = setInterval(trackFace, 150);
+    faceTimer = setInterval(trackFace, 50);
   } catch (error) {
     stream?.getTracks().forEach(track => track.stop());
     stream = null;
