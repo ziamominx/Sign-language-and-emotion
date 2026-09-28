@@ -3,5 +3,4 @@ __pycache__/
 .zia3
 sign_examples/
 .models/
-arena.sqlite3
 server.log

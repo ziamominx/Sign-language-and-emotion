@@ -18,13 +18,11 @@ from alphabet_model import ASLAlphabetRecognizer
 from personal_signs import PersonalSigns
 from train_model import load_model as load_trained_model
 from train_model import train as run_training
-from arena.api import arena_bp
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, template_folder=str(ROOT / "web" / "templates"),
             static_folder=str(ROOT / "web" / "static"))
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
-app.register_blueprint(arena_bp)
 recognizer = None
 recognizer_lock = Lock()
 alphabet_recognizer = None
@@ -303,37 +301,7 @@ def extract_keypoints(files, diagnostics=None):
 
 @app.get("/")
 def index():
-    return render_template("home.html")
-
-
-@app.get("/communicator")
-def communicator_page():
-    return render_template("communicator.html")
-
-
-@app.get("/charades")
-def charades_page():
-    return render_template("charades.html")
-
-
-@app.get("/memes")
-def memes_page():
-    return render_template("memes.html")
-
-
-@app.get("/history")
-def history_page():
-    return render_template("history.html")
-
-
-@app.get("/settings")
-def settings_page():
-    return render_template("settings.html")
-
-
-@app.get("/lab")
-def lab_page():
-    return render_template("lab.html")
+    return render_template("index.html")
 
 
 @app.get("/api/status")
